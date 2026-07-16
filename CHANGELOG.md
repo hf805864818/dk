@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.0.28] - 2026-07-16
+
+- a91faf8 fix: 修复编译错误 - DKAccountUI.h 缺少 triggerShowFloatingButton 声明
+- cf8b073 feat: 添加摇晃手机显示悬浮按钮功能
+
+
 ## [1.0.26] - 2026-07-16
 
 - f1a1cef fix: 修复注入插件后App启动闪退 - 延迟安装所有Hook
