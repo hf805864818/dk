@@ -365,46 +365,22 @@ static NSString *_accountsRootPath = nil;
         [[DKNetworkSessionManager sharedManager] clearDefaultAccountKeychainForSubAccountStartup];
     }
 
-    // 保存完旧账号后，暂停自动备份一段时间。
-    // 账号变量马上会切到目标账号，但应用内存里仍可能显示旧账号页面；
-    // 如果退出前 Cookie/生命周期回调触发 saveCurrentSession，
-    // 就会把旧账号运行态误保存成目标账号快照。
+    // 保存旧账号状态后，暂停自动备份一段时间。
+    // 如果用户不点"确定"而是切到后台，此时内存中的 _currentAccountName
+    // 仍然是旧账号，Cookie/生命周期回调会正确保存到旧账号快照。
     [[DKNetworkSessionManager sharedManager] suspendAutomaticSessionBackupForSeconds:10.0];
-    
+
     // 2. 保存当前账号的 UserDefaults 同步
     [[NSUserDefaults standardUserDefaults] synchronize];
-    
-    // 3. 切换账号
+
     NSString *oldAccount = _currentAccountName;
-    _currentAccountName = name;
-    
-    // 4. 保存当前活跃账号
-    // 只有插件自己的当前账号标记需要写入原始 NSUserDefaults，
-    // 因此把 isSwitching 的作用范围缩小到 saveCurrentState 内部。
-    [self saveCurrentState];
-    
-    // 5. 恢复目标账号的网络会话
-    // 此时 isSwitching 必须为 NO，才能让非默认账号恢复到自己的隔离存储。
-    if ([name isEqualToString:kDKDefaultAccountName]) {
-        // 切回默认账号时，先恢复默认账号 Keychain 数据。
-        // 子账号登录过程中 TTAccountSDK 可能误删了默认账号的 Keychain 项。
-        [[DKNetworkSessionManager sharedManager] restoreDefaultAccountKeychain];
-    }
-    [[DKNetworkSessionManager sharedManager] restoreSessionForAccount:name
-                                                clearSessionIfMissing:switchingToDefaultWithoutSnapshot];
-    
-    // 6. 通知数据隔离层刷新
-    [[DKDataIsolation sharedInstance] setup];
-    
-    NSLog(@"[DK] 账号切换: %@ -> %@", oldAccount, name);
-    
-    // 7. 发送账号切换通知
-    [[NSNotificationCenter defaultCenter] postNotificationName:@"DKAccountDidChangeNotification"
-                                                        object:nil
-                                                      userInfo:@{@"oldAccount": oldAccount ?: @"",
-                                                                 @"newAccount": name}];
-    
-    // 8. 提示用户重启应用使新账号生效
+
+    NSLog(@"[DK] 准备切换账号: %@ -> %@（等待用户确认）", oldAccount, name);
+
+    // 3. 提示用户重启应用使新账号生效
+    // 关键：_currentAccountName 的切换推迟到弹窗"确定"按钮的 handler 中，
+    // 在用户点击"确定"之前，内存状态保持不变（旧账号），
+    // 如果用户切到后台，Cookie 备份会正确保存到旧账号快照。
     dispatch_async(dispatch_get_main_queue(), ^{
         UIWindow *keyWindow = nil;
         if (@available(iOS 13.0, *)) {
@@ -422,24 +398,53 @@ static NSString *_accountsRootPath = nil;
         if (!keyWindow) {
             keyWindow = [UIApplication sharedApplication].keyWindow;
         }
-        
+
         UIViewController *rootVC = keyWindow.rootViewController;
         while (rootVC.presentedViewController) {
             rootVC = rootVC.presentedViewController;
         }
-        
+
         if (rootVC) {
             UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"账号已切换"
                                                                            message:[NSString stringWithFormat:@"已切换到账号「%@」\n应用即将重启以使新账号生效", name]
                                                                     preferredStyle:UIAlertControllerStyleAlert];
             [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+                // ============================================================
+                // 在 exit(0) 之前完成所有状态切换（此时用户已确认，不会回退）
+                // ============================================================
+
+                // 切换 _currentAccountName
+                _currentAccountName = name;
+
+                // 保存当前活跃账号标记到磁盘
+                [self saveCurrentState];
+
+                // 恢复目标账号的网络会话
+                // isSwitching 此时为 NO，非默认账号恢复到自己的隔离存储。
+                if ([name isEqualToString:kDKDefaultAccountName]) {
+                    [[DKNetworkSessionManager sharedManager] restoreDefaultAccountKeychain];
+                }
+                [[DKNetworkSessionManager sharedManager] restoreSessionForAccount:name
+                                                            clearSessionIfMissing:switchingToDefaultWithoutSnapshot];
+
+                // 通知数据隔离层刷新
+                [[DKDataIsolation sharedInstance] setup];
+
+                // 发送账号切换通知
+                [[NSNotificationCenter defaultCenter] postNotificationName:@"DKAccountDidChangeNotification"
+                                                                    object:nil
+                                                                  userInfo:@{@"oldAccount": oldAccount ?: @"",
+                                                                             @"newAccount": name}];
+
+                NSLog(@"[DK] 账号切换完成: %@ -> %@，即将退出应用", oldAccount, name);
+
                 // 退出应用，让用户重新打开后以新账号运行
                 exit(0);
             }]];
             [rootVC presentViewController:alert animated:YES completion:nil];
         }
     });
-    
+
     return YES;
 }
 

@@ -3,6 +3,21 @@
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <Security/Security.h>
+#import <CommonCrypto/CommonDigest.h>
+
+// ============================================================
+// Keychain 备份校验和工具
+// ============================================================
+static NSString* DKSHA256ForData(NSData *data) {
+    if (!data) return nil;
+    unsigned char digest[CC_SHA256_DIGEST_LENGTH];
+    CC_SHA256(data.bytes, (CC_LONG)data.length, digest);
+    NSMutableString *output = [NSMutableString stringWithCapacity:CC_SHA256_DIGEST_LENGTH * 2];
+    for (int i = 0; i < CC_SHA256_DIGEST_LENGTH; i++) {
+        [output appendFormat:@"%02x", digest[i]];
+    }
+    return output;
+}
 
 // ============================================================
 // DKNetworkSessionManager
@@ -551,8 +566,26 @@ static BOOL DKIsSessionRelatedDefaultsKey(NSString *key) {
     NSData *archivedData = [NSKeyedArchiver archivedDataWithRootObject:allItems
                                                  requiringSecureCoding:NO
                                                                  error:nil];
+    if (!archivedData) {
+        NSLog(@"[DK] ❌ 默认账号 Keychain 归档失败，备份中止");
+        return;
+    }
+
+    // 计算校验和，写入相邻文件
+    NSString *checksum = DKSHA256ForData(archivedData);
+    NSString *checksumPath = [snapshotPath stringByAppendingString:@".sha256"];
+    [checksum writeToFile:checksumPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+
     [archivedData writeToFile:snapshotPath atomically:YES];
-    NSLog(@"[DK] 默认账号 Keychain 已备份 %lu 项", (unsigned long)allItems.count);
+
+    // 验证写入
+    NSData *verifyData = [NSData dataWithContentsOfFile:snapshotPath];
+    NSString *verifyChecksum = DKSHA256ForData(verifyData);
+    if ([verifyChecksum isEqualToString:checksum]) {
+        NSLog(@"[DK] ✅ 默认账号 Keychain 已备份 %lu 项（校验和: %@）", (unsigned long)allItems.count, checksum);
+    } else {
+        NSLog(@"[DK] ❌ 默认账号 Keychain 备份校验失败！写入数据与预期不一致");
+    }
 }
 
 - (void)clearDefaultAccountKeychainForSubAccountStartup {
@@ -647,8 +680,29 @@ static BOOL DKIsSessionRelatedDefaultsKey(NSString *key) {
     NSData *archivedData = [NSData dataWithContentsOfFile:snapshotPath];
 
     if (!archivedData) {
-        NSLog(@"[DK] 默认账号 Keychain 备份不存在，跳过恢复");
+        NSLog(@"[DK] ⚠️ 默认账号 Keychain 备份不存在，跳过恢复");
         return;
+    }
+
+    // 校验备份文件完整性
+    NSString *checksumPath = [snapshotPath stringByAppendingString:@".sha256"];
+    NSString *savedChecksum = [NSString stringWithContentsOfFile:checksumPath
+                                                        encoding:NSUTF8StringEncoding
+                                                           error:nil];
+    NSString *actualChecksum = DKSHA256ForData(archivedData);
+
+    if (savedChecksum && ![savedChecksum isEqualToString:actualChecksum]) {
+        NSLog(@"[DK] ❌ 默认账号 Keychain 备份校验失败！备份文件可能已损坏");
+        NSLog(@"[DK] 预期校验和: %@", savedChecksum);
+        NSLog(@"[DK] 实际校验和: %@", actualChecksum);
+        NSLog(@"[DK] 跳过恢复，保护默认账号原始 Keychain 数据");
+        return;
+    }
+
+    if (savedChecksum) {
+        NSLog(@"[DK] ✅ 备份文件校验通过（%lu 字节）", (unsigned long)archivedData.length);
+    } else {
+        NSLog(@"[DK] ⚠️ 未找到校验和文件，跳过完整性验证（旧版本备份）");
     }
 
     NSError *error = nil;
