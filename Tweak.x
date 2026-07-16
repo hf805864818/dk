@@ -76,10 +76,10 @@ static OSStatus hooked_SecItemDelete(CFDictionaryRef query);
 // 构造函数 - 插件加载时调用
 // ============================================================
 %ctor {
+    // 初始化所有 %hook（必须在 autoreleasepool 之前）
+    %init;
+    
     @autoreleasepool {
-        // 初始化所有 %hook（必须！否则所有 %hook 都不会生效）
-        %init;
-        
         NSString *bundleID = DKGetCurrentBundleID();
         
         NSLog(@"========================================");
