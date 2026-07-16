@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.0.15] - 2026-07-16
+
+- f3afc76 fix: snapshot default account before adding sub accounts
+
+
 ## [1.0.14] - 2026-07-16
 
 - 3a935bb fix: preserve default account session when switching
