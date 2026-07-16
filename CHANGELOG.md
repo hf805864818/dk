@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.0.21] - 2026-07-16
+
+- c9846c0 fix: strengthen defaults and keychain isolation
+
+
 ## [1.0.20] - 2026-07-16
 
 - 886fec9 fix: prevent target session snapshot pollution during switch
