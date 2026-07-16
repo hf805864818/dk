@@ -58,6 +58,20 @@ static BOOL DKSessionRestoreInProgress = NO;
     [self backupSessionForAccount:currentAccount];
 }
 
+- (BOOL)snapshotDefaultSessionIfActive {
+    DKAccountManager *manager = [DKAccountManager sharedManager];
+    NSString *currentAccount = [manager currentAccountName];
+    if (![currentAccount isEqualToString:[manager defaultAccountName]]) {
+        NSLog(@"[DK] 当前不是默认账号，跳过默认账号快照");
+        return NO;
+    }
+
+    [[NSUserDefaults standardUserDefaults] synchronize];
+    [self backupSessionForAccount:[manager defaultAccountName]];
+    NSLog(@"[DK] 默认账号会话快照已保存");
+    return YES;
+}
+
 - (void)restoreSessionForAccount:(NSString *)accountName {
     NSString *sessionPath = [self sessionPathForAccount:accountName];
     NSFileManager *fm = [NSFileManager defaultManager];
@@ -112,6 +126,7 @@ static BOOL DKSessionRestoreInProgress = NO;
 }
 
 - (void)backupSessionForAccount:(NSString *)accountName {
+    DKAccountManager *manager = [DKAccountManager sharedManager];
     NSMutableDictionary *sessionData = [NSMutableDictionary dictionary];
     
     // 备份 Cookie
@@ -131,13 +146,23 @@ static BOOL DKSessionRestoreInProgress = NO;
     if (configData) {
         sessionData[@"sessionConfig"] = configData;
     }
+
+    BOOL isDefaultAccount = [accountName isEqualToString:[manager defaultAccountName]];
+    BOOL hasCookies = cookies.count > 0;
+    BOOL hasHeaders = headers.count > 0;
+    NSString *sessionPath = [self sessionPathForAccount:accountName];
+
+    if (isDefaultAccount && !hasCookies && !hasHeaders &&
+        [[NSFileManager defaultManager] fileExistsAtPath:sessionPath]) {
+        NSLog(@"[DK] 默认账号当前未检测到有效会话，保留已有默认账号快照");
+        return;
+    }
     
     // 保存时间戳
     sessionData[@"backupTime"] = [NSDate date];
     sessionData[@"accountName"] = accountName;
     
     // 写入文件
-    NSString *sessionPath = [self sessionPathForAccount:accountName];
     // 确保目录存在
     NSString *sessionDir = [sessionPath stringByDeletingLastPathComponent];
     [[NSFileManager defaultManager] createDirectoryAtPath:sessionDir

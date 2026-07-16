@@ -134,6 +134,12 @@ static NSString *_accountsRootPath = nil;
     if (!name || name.length == 0) return NO;
     if ([name isEqualToString:kDKDefaultAccountName]) return NO;
     if ([_accountNames containsObject:name]) return NO;
+
+    // 添加新账号前，如果当前还在默认账号，先强制保存默认账号会话快照。
+    // 这样后续立即切到 B 账号并登录，也能确保默认账号有可恢复的基线。
+    if ([_currentAccountName isEqualToString:kDKDefaultAccountName]) {
+        [[DKNetworkSessionManager sharedManager] snapshotDefaultSessionIfActive];
+    }
     
     // 创建账号数据目录结构
     NSString *accountPath = [self dataPathForAccount:name];
@@ -221,6 +227,16 @@ static NSString *_accountsRootPath = nil;
     if (![name isEqualToString:kDKDefaultAccountName] &&
         ![_accountNames containsObject:name]) {
         return NO;
+    }
+
+    BOOL switchingFromDefaultToSubAccount =
+        [_currentAccountName isEqualToString:kDKDefaultAccountName] &&
+        ![name isEqualToString:kDKDefaultAccountName];
+
+    if (switchingFromDefaultToSubAccount) {
+        // 从默认账号切到 B/C 等账号前，再强制保存一次默认账号快照。
+        // 这是最关键的保险点，避免默认账号没有快照导致切回时进入登录页。
+        [[DKNetworkSessionManager sharedManager] snapshotDefaultSessionIfActive];
     }
     
     // 1. 保存当前账号的网络会话状态

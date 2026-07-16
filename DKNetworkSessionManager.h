@@ -19,6 +19,9 @@
 /// 保存当前账号的网络会话状态
 - (void)saveCurrentSession;
 
+/// 如果当前正在使用默认账号，则立即保存默认账号会话快照
+- (BOOL)snapshotDefaultSessionIfActive;
+
 /// 恢复指定账号的网络会话状态
 - (void)restoreSessionForAccount:(NSString *)accountName;
 
