@@ -1,18 +1,29 @@
 #import <Foundation/Foundation.h>
 
-// ============================================================
-// DKUserDefaultsHook - NSUserDefaults Hook
-// 拦截 UserDefaults 读写，实现每个账号独立的配置存储
-// ============================================================
-
 @interface DKUserDefaultsHook : NSObject
 
 + (instancetype)sharedInstance;
-
-/// 安装 Hook
 - (void)install;
-
-/// 卸载 Hook
 - (void)uninstall;
 
 @end
+
+// ============================================================
+// 以下 C 函数用于在 Tweak.x 的 %hook 中直接读写 plist 文件
+// 避免创建 NSUserDefaults 实例触发 Hook 导致无限递归
+// ============================================================
+
+// 获取账号独立的 NSUserDefaults 实例（用于非 Hook 场景）
+NSUserDefaults* DKGetAccountUserDefaults(NSString *suiteName);
+
+// 直接从账号独立的 plist 读取值（用于 Hook 中，避免递归）
+id DKReadAccountUserDefault(NSString *key);
+
+// 直接写入账号独立的 plist（用于 Hook 中，避免递归）
+void DKWriteAccountUserDefault(NSString *key, id value);
+
+// 读取账号独立的 UserDefaults 全部字典（用于 Hook 中，避免递归）
+NSDictionary* DKReadAccountUserDefaultsDictionary(void);
+
+// 同步账号的 UserDefaults 到文件
+void DKSyncAccountUserDefaults(void);

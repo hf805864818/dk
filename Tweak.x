@@ -40,8 +40,10 @@
 // ============================================================
 extern NSString* DKRemapFilePath(NSString *path);
 extern NSURL* DKRemapFileURL(NSURL *url);
-extern NSUserDefaults* DKGetAccountUserDefaults(NSString *suiteName);
 extern void DKSyncAccountUserDefaults(void);
+extern id DKReadAccountUserDefault(NSString *key);
+extern void DKWriteAccountUserDefault(NSString *key, id value);
+extern NSDictionary* DKReadAccountUserDefaultsDictionary(void);
 extern NSDictionary* DKRemapKeychainQuery(NSDictionary *query);
 extern NSDictionary* DKUnmapKeychainResult(NSDictionary *result);
 
@@ -189,21 +191,15 @@ static OSStatus hooked_SecItemDelete(CFDictionaryRef query);
 // ============================================================
 
 // ============================================================
-// 递归保护标志（来自 DKUserDefaultsHook.m）
-// ============================================================
-extern BOOL DKGetAccountUserDefaultsRecursionGuard;
-
-// ============================================================
-// Hook 2: NSUserDefaults - 配置隔离
-// 每个账号使用独立的 UserDefaults 存储
+// Hook 2: NSUserDefaults - 配置隔离（直接读写 plist，避免递归）
+// 每个账号使用独立的 plist 文件存储配置
+// 注意：直接读写 plist 文件，不使用 NSUserDefaults 实例方法，
+// 避免触发 Hook 导致无限递归
 // ============================================================
 
 %hook NSUserDefaults
 
 - (id)objectForKey:(NSString *)defaultName {
-    // 递归保护：如果正在初始化账号 UserDefaults，跳过 Hook
-    if (DKGetAccountUserDefaultsRecursionGuard) return %orig;
-    
     DKAccountManager *manager = [DKAccountManager sharedManager];
     if (manager.isSwitching) return %orig;
     
@@ -212,18 +208,12 @@ extern BOOL DKGetAccountUserDefaultsRecursionGuard;
         return %orig;
     }
     
-    // 从账号独立的 UserDefaults 读取
-    NSUserDefaults *accountDefaults = DKGetAccountUserDefaults(nil);
-    id value = [accountDefaults objectForKey:defaultName];
+    // 直接从账号独立的 plist 读取
+    id value = DKReadAccountUserDefault(defaultName);
     return value ?: %orig;
 }
 
 - (void)setObject:(id)value forKey:(NSString *)defaultName {
-    if (DKGetAccountUserDefaultsRecursionGuard) {
-        %orig;
-        return;
-    }
-    
     DKAccountManager *manager = [DKAccountManager sharedManager];
     if (manager.isSwitching) {
         %orig;
@@ -236,21 +226,14 @@ extern BOOL DKGetAccountUserDefaultsRecursionGuard;
         return;
     }
     
-    // 写入账号独立的 UserDefaults
-    NSUserDefaults *accountDefaults = DKGetAccountUserDefaults(nil);
-    [accountDefaults setObject:value forKey:defaultName];
-    [accountDefaults synchronize];
+    // 直接写入账号独立的 plist
+    DKWriteAccountUserDefault(defaultName, value);
     
     // 也写入原始（保持兼容性）
     %orig;
 }
 
 - (void)removeObjectForKey:(NSString *)defaultName {
-    if (DKGetAccountUserDefaultsRecursionGuard) {
-        %orig;
-        return;
-    }
-    
     DKAccountManager *manager = [DKAccountManager sharedManager];
     if (manager.isSwitching) {
         %orig;
@@ -263,16 +246,13 @@ extern BOOL DKGetAccountUserDefaultsRecursionGuard;
         return;
     }
     
-    NSUserDefaults *accountDefaults = DKGetAccountUserDefaults(nil);
-    [accountDefaults removeObjectForKey:defaultName];
-    [accountDefaults synchronize];
+    // 直接从账号独立的 plist 移除
+    DKWriteAccountUserDefault(defaultName, nil);
     
     %orig;
 }
 
 - (BOOL)synchronize {
-    if (DKGetAccountUserDefaultsRecursionGuard) return %orig;
-    
     DKAccountManager *manager = [DKAccountManager sharedManager];
     NSString *currentAccount = [manager currentAccountName];
     
@@ -284,8 +264,6 @@ extern BOOL DKGetAccountUserDefaultsRecursionGuard;
 }
 
 - (NSDictionary *)dictionaryRepresentation {
-    if (DKGetAccountUserDefaultsRecursionGuard) return %orig;
-    
     DKAccountManager *manager = [DKAccountManager sharedManager];
     NSString *currentAccount = [manager currentAccountName];
     
@@ -296,9 +274,10 @@ extern BOOL DKGetAccountUserDefaultsRecursionGuard;
     // 合并账号数据和原始数据
     id origDict = %orig;
     NSMutableDictionary *merged = [origDict mutableCopy];
-    NSUserDefaults *accountDefaults = DKGetAccountUserDefaults(nil);
-    NSDictionary *accountDict = [accountDefaults dictionaryRepresentation];
-    [merged addEntriesFromDictionary:accountDict];
+    NSDictionary *accountDict = DKReadAccountUserDefaultsDictionary();
+    if (accountDict) {
+        [merged addEntriesFromDictionary:accountDict];
+    }
     
     return merged;
 }

@@ -31,18 +31,18 @@
 
 // ============================================================
 // 为每个账号创建独立的 NSUserDefaults 实例
+// （用于非 Hook 场景，如 DKAccountManager 内部使用）
 // ============================================================
 
 static NSMutableDictionary<NSString *, NSUserDefaults *> *_accountDefaultsCache = nil;
 
 // ============================================================
-// 递归保护标志 — 防止 NSUserDefaults Hook 与 DKGetAccountUserDefaults 形成无限递归
-// 注意：不能是 static，需要被 Tweak.x 中的 extern 引用
+// 递归保护 — 防止 DKGetAccountUserDefaults 内部创建 NSUserDefaults
+// 时触发 Hook 导致无限递归
 // ============================================================
-BOOL DKGetAccountUserDefaultsRecursionGuard = NO;
+static BOOL DKGetAccountUserDefaultsRecursionGuard = NO;
 
 NSUserDefaults* DKGetAccountUserDefaults(NSString *suiteName) {
-    // 递归保护：如果已经在 DKGetAccountUserDefaults 中，直接走原始行为
     if (DKGetAccountUserDefaultsRecursionGuard) {
         if (suiteName) {
             return [[NSUserDefaults alloc] initWithSuiteName:suiteName];
@@ -61,7 +61,6 @@ NSUserDefaults* DKGetAccountUserDefaults(NSString *suiteName) {
     NSString *currentAccount = [manager currentAccountName];
     
     if ([currentAccount isEqualToString:[manager defaultAccountName]]) {
-        // 默认账号使用原始行为
         DKGetAccountUserDefaultsRecursionGuard = NO;
         if (suiteName) {
             return [[NSUserDefaults alloc] initWithSuiteName:suiteName];
@@ -101,6 +100,62 @@ NSUserDefaults* DKGetAccountUserDefaults(NSString *suiteName) {
     return cached;
 }
 
+// ============================================================
+// 直接读取账号独立 UserDefaults 的 plist 文件
+// 用于 Hook 中，避免创建 NSUserDefaults 实例触发递归
+// ============================================================
+
+static NSString* _DKGetAccountPlistPath(void) {
+    // 获取当前账号的 UserDefaults plist 路径
+    DKAccountManager *manager = [DKAccountManager sharedManager];
+    NSString *currentAccount = [manager currentAccountName];
+    if ([currentAccount isEqualToString:[manager defaultAccountName]]) {
+        return nil; // 默认账号不隔离
+    }
+    
+    NSString *plistPath = [[DKDataIsolation sharedInstance] userDefaultsFileForSuiteName:nil];
+    // 确保文件存在
+    if (plistPath && ![[NSFileManager defaultManager] fileExistsAtPath:plistPath]) {
+        [[NSFileManager defaultManager] createDirectoryAtPath:[plistPath stringByDeletingLastPathComponent]
+                                  withIntermediateDirectories:YES
+                                                   attributes:nil
+                                                        error:NULL];
+        [@{} writeToFile:plistPath atomically:YES];
+    }
+    return plistPath;
+}
+
+// 直接从账号独立的 plist 读取值（用于 Hook 中，避免递归）
+id DKReadAccountUserDefault(NSString *key) {
+    NSString *plistPath = _DKGetAccountPlistPath();
+    if (!plistPath) return nil;
+    
+    NSDictionary *dict = [NSDictionary dictionaryWithContentsOfFile:plistPath];
+    return dict[key];
+}
+
+// 直接写入账号独立的 plist（用于 Hook 中，避免递归）
+void DKWriteAccountUserDefault(NSString *key, id value) {
+    NSString *plistPath = _DKGetAccountPlistPath();
+    if (!plistPath) return;
+    
+    NSMutableDictionary *dict = [NSMutableDictionary dictionaryWithContentsOfFile:plistPath] ?: [NSMutableDictionary dictionary];
+    if (value) {
+        dict[key] = value;
+    } else {
+        [dict removeObjectForKey:key];
+    }
+    [dict writeToFile:plistPath atomically:YES];
+}
+
+// 读取账号独立的 UserDefaults 全部字典（用于 Hook 中，避免递归）
+NSDictionary* DKReadAccountUserDefaultsDictionary(void) {
+    NSString *plistPath = _DKGetAccountPlistPath();
+    if (!plistPath) return nil;
+    
+    return [NSDictionary dictionaryWithContentsOfFile:plistPath];
+}
+
 // 同步账号的 UserDefaults 到文件
 void DKSyncAccountUserDefaults(void) {
     DKAccountManager *manager = [DKAccountManager sharedManager];
@@ -108,10 +163,10 @@ void DKSyncAccountUserDefaults(void) {
     
     if ([currentAccount isEqualToString:[manager defaultAccountName]]) return;
     
-    // 同步标准 UserDefaults
-    [[NSUserDefaults standardUserDefaults] synchronize];
+    // 注意：不要调用 [[NSUserDefaults standardUserDefaults] synchronize]，
+    // 这会触发 %hook 的 synchronize 方法，导致无限递归
     
-    // 同步自定义 suite
+    // 将缓存中的 NSUserDefaults 数据写入 plist 文件
     for (NSString *cacheKey in _accountDefaultsCache) {
         NSUserDefaults *defaults = _accountDefaultsCache[cacheKey];
         NSDictionary *dict = [defaults dictionaryRepresentation];
