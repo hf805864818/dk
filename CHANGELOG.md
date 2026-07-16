@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.0.20] - 2026-07-16
+
+- 886fec9 fix: prevent target session snapshot pollution during switch
+
+
 ## [1.0.19] - 2026-07-16
 
 - 8068a3e fix: do not clear default account auth keys on restore
