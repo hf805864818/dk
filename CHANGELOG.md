@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.0.36] - 2026-07-16
+
+- dfe1eab fix: 修复三个账号切换潜在问题
+
+
 ## [1.0.35] - 2026-07-16
 
 - 17748ab fix: 用 fishhook 替换 MSHookFunction，修复 iOS 17 W^X 保护导致闪退
