@@ -209,6 +209,23 @@ static OSStatus hooked_SecItemDelete(CFDictionaryRef query);
     return %orig(DKRemapFilePath(path), writeOptionsMask, errorPtr);
 }
 
+// NSURL 方法
++ (instancetype)dataWithContentsOfURL:(NSURL *)url {
+    return %orig(DKRemapFileURL(url));
+}
+
+- (instancetype)initWithContentsOfURL:(NSURL *)url {
+    return %orig(DKRemapFileURL(url));
+}
+
+- (BOOL)writeToURL:(NSURL *)url atomically:(BOOL)atomically {
+    return %orig(DKRemapFileURL(url), atomically);
+}
+
+- (BOOL)writeToURL:(NSURL *)url options:(NSDataWritingOptions)writeOptionsMask error:(NSError **)errorPtr {
+    return %orig(DKRemapFileURL(url), writeOptionsMask, errorPtr);
+}
+
 %end
 
 %hook NSDictionary
@@ -221,6 +238,15 @@ static OSStatus hooked_SecItemDelete(CFDictionaryRef query);
     return %orig(DKRemapFilePath(path), atomically);
 }
 
+// NSURL 方法
++ (NSDictionary *)dictionaryWithContentsOfURL:(NSURL *)url {
+    return %orig(DKRemapFileURL(url));
+}
+
+- (BOOL)writeToURL:(NSURL *)url atomically:(BOOL)atomically {
+    return %orig(DKRemapFileURL(url), atomically);
+}
+
 %end
 
 %hook NSArray
@@ -231,6 +257,15 @@ static OSStatus hooked_SecItemDelete(CFDictionaryRef query);
 
 - (BOOL)writeToFile:(NSString *)path atomically:(BOOL)atomically {
     return %orig(DKRemapFilePath(path), atomically);
+}
+
+// NSURL 方法
++ (NSArray *)arrayWithContentsOfURL:(NSURL *)url {
+    return %orig(DKRemapFileURL(url));
+}
+
+- (BOOL)writeToURL:(NSURL *)url atomically:(BOOL)atomically {
+    return %orig(DKRemapFileURL(url), atomically);
 }
 
 %end
@@ -249,6 +284,19 @@ static OSStatus hooked_SecItemDelete(CFDictionaryRef query);
     return %orig(DKRemapFilePath(path), atomically, enc, error);
 }
 
+// NSURL 方法
++ (instancetype)stringWithContentsOfURL:(NSURL *)url encoding:(NSStringEncoding)enc error:(NSError **)error {
+    return %orig(DKRemapFileURL(url), enc, error);
+}
+
+- (instancetype)initWithContentsOfURL:(NSURL *)url encoding:(NSStringEncoding)enc error:(NSError **)error {
+    return %orig(DKRemapFileURL(url), enc, error);
+}
+
+- (BOOL)writeToURL:(NSURL *)url atomically:(BOOL)atomically encoding:(NSStringEncoding)enc error:(NSError **)error {
+    return %orig(DKRemapFileURL(url), atomically, enc, error);
+}
+
 %end
 
 %hook NSPropertyListSerialization
@@ -259,6 +307,62 @@ static OSStatus hooked_SecItemDelete(CFDictionaryRef query);
 
 + (NSData *)dataWithPropertyList:(id)plist format:(NSPropertyListFormat)format options:(NSPropertyListWriteOptions)opt error:(NSError **)error {
     return %orig(plist, format, opt, error);
+}
+
+%end
+
+// ============================================================
+// Hook 1.6: NSFileHandle — 底层文件读写
+// 拦截 NSFileHandle 的文件操作（Flutter 可能使用此 API）
+// ============================================================
+
+%hook NSFileHandle
+
+// 已弃用但可能仍在使用
++ (instancetype)fileHandleForReadingAtPath:(NSString *)path {
+    return %orig(DKRemapFilePath(path));
+}
+
++ (instancetype)fileHandleForWritingAtPath:(NSString *)path {
+    return %orig(DKRemapFilePath(path));
+}
+
++ (instancetype)fileHandleForUpdatingAtPath:(NSString *)path {
+    return %orig(DKRemapFilePath(path));
+}
+
+// 现代 API
++ (instancetype)fileHandleForReadingFromURL:(NSURL *)url error:(NSError **)error {
+    return %orig(DKRemapFileURL(url), error);
+}
+
++ (instancetype)fileHandleForWritingToURL:(NSURL *)url error:(NSError **)error {
+    return %orig(DKRemapFileURL(url), error);
+}
+
++ (instancetype)fileHandleForUpdatingURL:(NSURL *)url error:(NSError **)error {
+    return %orig(DKRemapFileURL(url), error);
+}
+
+%end
+
+// ============================================================
+// Hook 1.7: NSKeyedUnarchiver / NSKeyedArchiver — 序列化持久化
+// 拦截归档/解归档的文件操作
+// ============================================================
+
+%hook NSKeyedUnarchiver
+
++ (id)unarchiveObjectWithFile:(NSString *)path {
+    return %orig(DKRemapFilePath(path));
+}
+
+%end
+
+%hook NSKeyedArchiver
+
++ (BOOL)archiveRootObject:(id)rootObject toFile:(NSString *)path {
+    return %orig(rootObject, DKRemapFilePath(path));
 }
 
 %end
@@ -607,6 +711,10 @@ didReceiveNotificationResponse:(UNNotificationResponse *)response
         MSHookFunction((void *)SecItemDelete, (void *)hooked_SecItemDelete, (void **)&original_SecItemDelete);
         NSLog(@"[DK] Keychain Hook 已安装");
         
+        // 安装 POSIX 文件 I/O Hook（捕获 Flutter dart:io 的 fopen 调用）
+        MSHookFunction((void *)fopen, (void *)hooked_fopen, (void **)&original_fopen);
+        NSLog(@"[DK] POSIX fopen Hook 已安装");
+        
         // 延迟启动 UI 层敏感词过滤绕过（等应用完全启动后）
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             NSLog(@"[DK] 敏感词过滤绕过 UI 层 Hook 已就绪");
@@ -686,3 +794,42 @@ static OSStatus hooked_SecItemDelete(CFDictionaryRef query) {
 // 包装覆盖。对于流式 API，数据在 completion 中统一处理。
 // 如需更精细的逐块拦截，可在运行时通过 MSHookMessageEx 动态绑定。
 // ============================================================
+
+// ============================================================
+// POSIX fopen Hook — 捕获 Flutter dart:io 的底层文件 I/O
+// Flutter 的 File 类使用 C 标准库的 fopen/fread/fwrite 进行文件操作，
+// 这些底层调用不会被 Foundation 层的 %hook 拦截。
+// 通过 MSHookFunction 直接修改 fopen 的机器码指令，实现路径重定向。
+// ============================================================
+
+// 递归保护 — 防止 fopen 内部调用（如 NSString 的 UTF8String 转换）
+// 又触发 hooked_fopen 导致无限递归
+static BOOL _dk_fopen_hook_guard = NO;
+
+FILE* (*original_fopen)(const char *path, const char *mode);
+
+FILE* hooked_fopen(const char *path, const char *mode) {
+    // 递归保护：如果已经在 hooked_fopen 中，直接走原始实现
+    if (_dk_fopen_hook_guard) {
+        return original_fopen(path, mode);
+    }
+    
+    _dk_fopen_hook_guard = YES;
+    
+    FILE *result = NULL;
+    if (path) {
+        NSString *nsPath = [NSString stringWithUTF8String:path];
+        NSString *remapped = DKRemapFilePath(nsPath);
+        if (remapped && remapped != nsPath) {
+            const char *newPath = [remapped UTF8String];
+            result = original_fopen(newPath, mode);
+        } else {
+            result = original_fopen(path, mode);
+        }
+    } else {
+        result = original_fopen(path, mode);
+    }
+    
+    _dk_fopen_hook_guard = NO;
+    return result;
+}
