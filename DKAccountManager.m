@@ -299,6 +299,12 @@ static NSString *_accountsRootPath = nil;
     // isSwitching 会让 UserDefaults Hook 直接走原始存储，
     // 如果当前是 B 账号，会错误读取/写入默认账号的登录态。
     [[DKNetworkSessionManager sharedManager] saveCurrentSession];
+
+    // 保存完旧账号后，暂停自动备份一段时间。
+    // 账号变量马上会切到目标账号，但应用内存里仍可能显示旧账号页面；
+    // 如果退出前 Cookie/生命周期回调触发 saveCurrentSession，
+    // 就会把旧账号运行态误保存成目标账号快照。
+    [[DKNetworkSessionManager sharedManager] suspendAutomaticSessionBackupForSeconds:10.0];
     
     // 2. 保存当前账号的 UserDefaults 同步
     [[NSUserDefaults standardUserDefaults] synchronize];

@@ -19,6 +19,9 @@
 /// 保存当前账号的网络会话状态
 - (void)saveCurrentSession;
 
+/// 暂停自动会话备份，避免账号切换退出前把旧账号运行态保存到新账号快照
+- (void)suspendAutomaticSessionBackupForSeconds:(NSTimeInterval)seconds;
+
 /// 如果当前正在使用默认账号，则立即保存默认账号会话快照
 - (BOOL)snapshotDefaultSessionIfActive;
 

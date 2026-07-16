@@ -10,6 +10,7 @@
 // ============================================================
 
 static BOOL DKSessionRestoreInProgress = NO;
+static NSDate *DKSessionBackupSuspendedUntil = nil;
 
 static NSArray<NSString *>* DKAuthHeaderKeys(void) {
     return @[@"auth_token", @"access_token", @"refresh_token",
@@ -78,6 +79,12 @@ static BOOL DKIsSessionRelatedDefaultsKey(NSString *key) {
         return;
     }
 
+    if (DKSessionBackupSuspendedUntil &&
+        [[NSDate date] compare:DKSessionBackupSuspendedUntil] == NSOrderedAscending) {
+        NSLog(@"[DK] 自动会话备份已暂停，跳过本次保存");
+        return;
+    }
+
     DKAccountManager *manager = [DKAccountManager sharedManager];
     NSString *currentAccount = [manager currentAccountName];
 
@@ -85,6 +92,12 @@ static BOOL DKIsSessionRelatedDefaultsKey(NSString *key) {
     // NSHTTPCookieStorage 是进程级共享存储，B 账号登录后可能覆盖当前 Cookie；
     // 如果默认账号不备份，切回默认账号时就容易掉到登录页。
     [self backupSessionForAccount:currentAccount];
+}
+
+- (void)suspendAutomaticSessionBackupForSeconds:(NSTimeInterval)seconds {
+    NSTimeInterval duration = MAX(seconds, 0);
+    DKSessionBackupSuspendedUntil = [NSDate dateWithTimeIntervalSinceNow:duration];
+    NSLog(@"[DK] 自动会话备份暂停 %.1f 秒", duration);
 }
 
 - (BOOL)snapshotDefaultSessionIfActive {
@@ -154,7 +167,14 @@ static BOOL DKIsSessionRelatedDefaultsKey(NSString *key) {
         // 恢复 HTTP 头部 Token
         NSDictionary *headers = sessionData[@"authHeaders"];
         if (headers) {
-            [self _restoreAuthHeaders:headers];
+            DKAccountManager *manager = [DKAccountManager sharedManager];
+            if (![accountName isEqualToString:[manager defaultAccountName]]) {
+                [self _restoreAuthHeaders:headers];
+            } else {
+                // 默认账号的 UserDefaults/Keychain 原始登录态由应用自己维护。
+                // 这里不恢复 authHeaders，避免旧快照或不完整快照覆盖默认账号真实登录态。
+                NSLog(@"[DK] 默认账号跳过 authHeaders 恢复，仅恢复 Cookie");
+            }
         }
 
         // 恢复 NSURLSession 配置

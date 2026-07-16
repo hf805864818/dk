@@ -5,6 +5,8 @@
 #import <objc/runtime.h>
 #import <AudioToolbox/AudioToolbox.h>
 
+extern NSString* DKGetVersion(void);
+
 // ============================================================
 // UI 常量
 // ============================================================
@@ -494,6 +496,7 @@ static char kDKHiddenIndicatorKey;
         [menuItems addObject:filterLabel];
 
         [menuItems addObject:@"🧹 清理多开数据"];
+        [menuItems addObject:[NSString stringWithFormat:@"ℹ️ 当前版本 v%@", DKGetVersion() ?: @"unknown"]];
         [menuItems addObject:@"👁 隐藏图标"];
         
         NSInteger rowCount = menuItems.count;
@@ -542,8 +545,9 @@ static char kDKHiddenIndicatorKey;
             NSString *item = menuItems[i];
             BOOL isAddAccount = (i == 0);
             BOOL isDefaultAccount = (i == 1);
-            BOOL isFilterToggle = (i == rowCount - 3);
-            BOOL isClearData = (i == rowCount - 2);
+            BOOL isFilterToggle = (i == rowCount - 4);
+            BOOL isClearData = (i == rowCount - 3);
+            BOOL isVersionInfo = (i == rowCount - 2);
             BOOL isHideOption = (i == rowCount - 1);
             BOOL isCurrentAccount = [item isEqualToString:currentAccount] ||
                                     (isDefaultAccount && [currentAccount isEqualToString:[[DKAccountManager sharedManager] defaultAccountName]]);
@@ -560,6 +564,7 @@ static char kDKHiddenIndicatorKey;
             label.text = item;
             label.textColor = isAddAccount ? [UIColor colorWithRed:0.3 green:0.7 blue:1.0 alpha:1.0] :
                               isHideOption ? [UIColor colorWithWhite:0.6 alpha:1.0] :
+                              isVersionInfo ? [UIColor colorWithWhite:0.75 alpha:1.0] :
                               isClearData ? [UIColor colorWithRed:1.0 green:0.35 blue:0.25 alpha:1.0] :
                               isFilterToggle ? [UIColor colorWithRed:1.0 green:0.75 blue:0.3 alpha:1.0] :
                               [UIColor whiteColor];
@@ -569,14 +574,18 @@ static char kDKHiddenIndicatorKey;
                 label.font = [UIFont boldSystemFontOfSize:15];
             }
             
-            if (isCurrentAccount && !isAddAccount && !isHideOption && !isFilterToggle && !isClearData) {
+            if (isVersionInfo) {
+                label.font = [UIFont systemFontOfSize:13];
+            }
+
+            if (isCurrentAccount && !isAddAccount && !isHideOption && !isFilterToggle && !isClearData && !isVersionInfo) {
                 label.text = [NSString stringWithFormat:@"✓ %@", item];
                 label.textColor = [UIColor colorWithRed:0.3 green:0.9 blue:0.5 alpha:1.0];
             }
             
             [rowView addSubview:label];
             
-            if (!isAddAccount && !isHideOption && !isFilterToggle && !isClearData) {
+            if (!isAddAccount && !isHideOption && !isFilterToggle && !isClearData && !isVersionInfo) {
                 NSInteger unread = [[DKPushNotificationBridge sharedInstance] unreadCountForAccount:item];
                 if (unread > 0) {
                     UILabel *badge = [[UILabel alloc] initWithFrame:CGRectMake(kMenuWidth - 42, 12, 24, 24)];
@@ -597,7 +606,7 @@ static char kDKHiddenIndicatorKey;
                                             action:@selector(_handleMenuItemTap:)];
             [rowView addGestureRecognizer:tap];
             
-            if (!isAddAccount && !isHideOption && !isFilterToggle && !isClearData) {
+            if (!isAddAccount && !isHideOption && !isFilterToggle && !isClearData && !isVersionInfo) {
                 UILongPressGestureRecognizer *longPress = [[UILongPressGestureRecognizer alloc]
                                                             initWithTarget:self
                                                             action:@selector(_handleMenuItemLongPress:)];
@@ -666,9 +675,9 @@ static char kDKHiddenIndicatorKey;
     [self hideAccountMenu];
     
     NSArray *accounts = [[DKAccountManager sharedManager] allAccountNames];
-    // 0: add, 1: default, 2..N+1: accounts, N+2: filter, N+3: clear data, N+4: hide
+    // 0: add, 1: default, 2..N+1: accounts, N+2: filter, N+3: clear data, N+4: version, N+5: hide
     NSInteger defaultAccountOffset = 1; // 默认账号在菜单中的偏移
-    NSInteger totalItems = 1 + defaultAccountOffset + accounts.count + 3;
+    NSInteger totalItems = 1 + defaultAccountOffset + accounts.count + 4;
     
     if (index == 0) {
         [self _promptAddAccount];
@@ -680,8 +689,10 @@ static char kDKHiddenIndicatorKey;
         [self hideFloatingButtonAnimated:YES];
         [self _showToast:@"悬浮按钮已隐藏，三指长按可重新呼出"];
     } else if (index == totalItems - 2) {
-        [self _promptClearMultiAccountData];
+        [self _showToast:[NSString stringWithFormat:@"当前版本 v%@", DKGetVersion() ?: @"unknown"]];
     } else if (index == totalItems - 3) {
+        [self _promptClearMultiAccountData];
+    } else if (index == totalItems - 4) {
         [self _toggleContentFilter];
     } else {
         NSInteger accountIndex = index - 2;
