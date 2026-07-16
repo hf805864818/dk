@@ -19,6 +19,10 @@
     return instance;
 }
 
++ (instancetype)sharedManager {
+    return [self sharedInstance];
+}
+
 - (void)setup {
     // 监听应用进入后台，保存会话
     [[NSNotificationCenter defaultCenter] addObserver:self

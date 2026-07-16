@@ -10,6 +10,9 @@
 
 + (instancetype)sharedInstance;
 
+/// 兼容旧调用方式
++ (instancetype)sharedManager;
+
 /// 初始化网络会话管理
 - (void)setup;
 

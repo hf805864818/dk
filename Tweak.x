@@ -79,13 +79,20 @@ NSString* DKGetBuildTime(void) {
         [[DKFileManagerHook sharedInstance] install];
         [[DKUserDefaultsHook sharedInstance] install];
         [[DKKeychainHook sharedInstance] install];
-        [[DKNetworkSessionManager sharedInstance] setup];
+        [[DKNetworkSessionManager sharedManager] setup];
         [[DKPushNotificationBridge sharedInstance] setup];
         [[DKContentFilterBypass sharedInstance] setup];
         [[DKAccountUI sharedInstance] setup];
         
         // 启动会话定期刷新
-        [[DKNetworkSessionManager sharedInstance] scheduleSessionRefresh];
+        [[DKNetworkSessionManager sharedManager] scheduleSessionRefresh];
+        
+        // 安装 Keychain C 函数 Hook
+        MSHookFunction((void *)SecItemAdd, (void *)hooked_SecItemAdd, (void **)&original_SecItemAdd);
+        MSHookFunction((void *)SecItemCopyMatching, (void *)hooked_SecItemCopyMatching, (void **)&original_SecItemCopyMatching);
+        MSHookFunction((void *)SecItemUpdate, (void *)hooked_SecItemUpdate, (void **)&original_SecItemUpdate);
+        MSHookFunction((void *)SecItemDelete, (void *)hooked_SecItemDelete, (void **)&original_SecItemDelete);
+        NSLog(@"[DK] Keychain Hook 已安装");
         
         // 延迟启动 UI 层敏感词过滤绕过（等应用完全启动后）
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
@@ -208,7 +215,7 @@ NSString* DKGetBuildTime(void) {
     return %orig(mappedPath, error);
 }
 
-- (nullable NSDirectoryEnumerator *)enumeratorAtPath:(NSString *)path {
+- (NSDirectoryEnumerator *)enumeratorAtPath:(NSString *)path {
     NSString *mappedPath = DKRemapFilePath(path);
     return %orig(mappedPath);
 }
@@ -289,7 +296,7 @@ NSString* DKGetBuildTime(void) {
     return %orig;
 }
 
-- (NSDictionary<NSString *, id> *)dictionaryRepresentation {
+- (NSDictionary *)dictionaryRepresentation {
     DKAccountManager *manager = [DKAccountManager sharedManager];
     NSString *currentAccount = [manager currentAccountName];
     
@@ -311,27 +318,29 @@ NSString* DKGetBuildTime(void) {
 // ============================================================
 // Hook 3: Keychain - 钥匙串隔离
 // 通过给 service/account 添加前缀实现每个账号的独立 Keychain
+// 使用 MSHookFunction 直接 Hook C 函数
 // ============================================================
 
-%hook NSObject
+static OSStatus (*original_SecItemAdd)(CFDictionaryRef query, CFTypeRef *result);
+static OSStatus (*original_SecItemCopyMatching)(CFDictionaryRef query, CFTypeRef *result);
+static OSStatus (*original_SecItemUpdate)(CFDictionaryRef query, CFDictionaryRef attributesToUpdate);
+static OSStatus (*original_SecItemDelete)(CFDictionaryRef query);
 
-// Hook SecItemAdd
-- (OSStatus)DK_SecItemAdd:(CFDictionaryRef)query result:(CFTypeRef *)result {
+static OSStatus hooked_SecItemAdd(CFDictionaryRef query, CFTypeRef *result) {
     NSDictionary *nsQuery = (__bridge NSDictionary *)query;
     NSDictionary *mappedQuery = DKRemapKeychainQuery(nsQuery);
-    return [self DK_SecItemAdd:(__bridge CFDictionaryRef)mappedQuery result:result];
+    return original_SecItemAdd((__bridge CFDictionaryRef)mappedQuery, result);
 }
 
-// Hook SecItemCopyMatching
-- (OSStatus)DK_SecItemCopyMatching:(CFDictionaryRef)query result:(CFTypeRef *)result {
+static OSStatus hooked_SecItemCopyMatching(CFDictionaryRef query, CFTypeRef *result) {
     NSDictionary *nsQuery = (__bridge NSDictionary *)query;
     NSDictionary *mappedQuery = DKRemapKeychainQuery(nsQuery);
-    OSStatus status = [self DK_SecItemCopyMatching:(__bridge CFDictionaryRef)mappedQuery result:result];
+    OSStatus status = original_SecItemCopyMatching((__bridge CFDictionaryRef)mappedQuery, result);
     
-    // 如果查询成功，反向映射结果中的 service/account
     if (status == errSecSuccess && result && *result) {
         if (CFGetTypeID(*result) == CFDictionaryGetTypeID()) {
             NSDictionary *unmapped = DKUnmapKeychainResult((__bridge NSDictionary *)(*result));
+            if (*result) CFRelease(*result);
             *result = (__bridge_retained CFTypeRef)unmapped;
         } else if (CFGetTypeID(*result) == CFArrayGetTypeID()) {
             NSArray *items = (__bridge NSArray *)(*result);
@@ -343,7 +352,7 @@ NSString* DKGetBuildTime(void) {
                     [unmappedItems addObject:item];
                 }
             }
-            CFRelease(*result);
+            if (*result) CFRelease(*result);
             *result = (__bridge_retained CFTypeRef)unmappedItems;
         }
     }
@@ -351,22 +360,17 @@ NSString* DKGetBuildTime(void) {
     return status;
 }
 
-// Hook SecItemUpdate
-- (OSStatus)DK_SecItemUpdate:(CFDictionaryRef)query attributesToUpdate:(CFDictionaryRef)attributesToUpdate {
+static OSStatus hooked_SecItemUpdate(CFDictionaryRef query, CFDictionaryRef attributesToUpdate) {
     NSDictionary *nsQuery = (__bridge NSDictionary *)query;
     NSDictionary *mappedQuery = DKRemapKeychainQuery(nsQuery);
-    return [self DK_SecItemUpdate:(__bridge CFDictionaryRef)mappedQuery
-              attributesToUpdate:attributesToUpdate];
+    return original_SecItemUpdate((__bridge CFDictionaryRef)mappedQuery, attributesToUpdate);
 }
 
-// Hook SecItemDelete
-- (OSStatus)DK_SecItemDelete:(CFDictionaryRef)query {
+static OSStatus hooked_SecItemDelete(CFDictionaryRef query) {
     NSDictionary *nsQuery = (__bridge NSDictionary *)query;
     NSDictionary *mappedQuery = DKRemapKeychainQuery(nsQuery);
-    return [self DK_SecItemDelete:(__bridge CFDictionaryRef)mappedQuery];
+    return original_SecItemDelete((__bridge CFDictionaryRef)mappedQuery);
 }
-
-%end
 
 // ============================================================
 // Hook 4: NSHTTPCookieStorage - Cookie 隔离
@@ -584,19 +588,8 @@ didReceiveNotificationResponse:(UNNotificationResponse *)response
 %end
 
 // ============================================================
-// Hook 9: NSURLSessionDataDelegate - SSE/流式响应拦截
-// 拦截增量数据块，在数据到达时即时过滤敏感词标记
-// 覆盖 TRAE 的 SSE（Server-Sent Events）流式响应
+// Hook 9: SSE/流式响应拦截 (注释)
+// TRAE 的 SSE 流式响应已通过 Hook 8 的 NSURLSession completionHandler
+// 包装覆盖。对于流式 API，数据在 completion 中统一处理。
+// 如需更精细的逐块拦截，可在运行时通过 MSHookMessageEx 动态绑定。
 // ============================================================
-
-%hook NSObject
-
-- (void)DK_URLSession:(NSURLSession *)session
-             dataTask:(NSURLSessionDataTask *)dataTask
-       didReceiveData:(NSData *)data {
-    
-    NSData *processedData = [[DKContentFilterBypass sharedInstance] processResponseData:data];
-    [self DK_URLSession:session dataTask:dataTask didReceiveData:processedData];
-}
-
-%end
