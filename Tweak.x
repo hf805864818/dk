@@ -188,9 +188,22 @@ static OSStatus hooked_SecItemDelete(CFDictionaryRef query);
 // 每个账号使用独立的 UserDefaults 存储
 // ============================================================
 
+// ============================================================
+// 递归保护标志（来自 DKUserDefaultsHook.m）
+// ============================================================
+extern BOOL DKGetAccountUserDefaultsRecursionGuard;
+
+// ============================================================
+// Hook 2: NSUserDefaults - 配置隔离
+// 每个账号使用独立的 UserDefaults 存储
+// ============================================================
+
 %hook NSUserDefaults
 
 - (id)objectForKey:(NSString *)defaultName {
+    // 递归保护：如果正在初始化账号 UserDefaults，跳过 Hook
+    if (DKGetAccountUserDefaultsRecursionGuard) return %orig;
+    
     DKAccountManager *manager = [DKAccountManager sharedManager];
     if (manager.isSwitching) return %orig;
     
@@ -201,10 +214,13 @@ static OSStatus hooked_SecItemDelete(CFDictionaryRef query);
     
     // 从账号独立的 UserDefaults 读取
     NSUserDefaults *accountDefaults = DKGetAccountUserDefaults(nil);
-    return [accountDefaults objectForKey:defaultName] ?: %orig;
+    id value = [accountDefaults objectForKey:defaultName];
+    return value ?: %orig;
 }
 
 - (void)setObject:(id)value forKey:(NSString *)defaultName {
+    if (DKGetAccountUserDefaultsRecursionGuard) { %orig; return; }
+    
     DKAccountManager *manager = [DKAccountManager sharedManager];
     if (manager.isSwitching) {
         %orig;
@@ -227,6 +243,8 @@ static OSStatus hooked_SecItemDelete(CFDictionaryRef query);
 }
 
 - (void)removeObjectForKey:(NSString *)defaultName {
+    if (DKGetAccountUserDefaultsRecursionGuard) { %orig; return; }
+    
     DKAccountManager *manager = [DKAccountManager sharedManager];
     if (manager.isSwitching) {
         %orig;
@@ -247,6 +265,8 @@ static OSStatus hooked_SecItemDelete(CFDictionaryRef query);
 }
 
 - (BOOL)synchronize {
+    if (DKGetAccountUserDefaultsRecursionGuard) return %orig;
+    
     DKAccountManager *manager = [DKAccountManager sharedManager];
     NSString *currentAccount = [manager currentAccountName];
     
@@ -258,6 +278,8 @@ static OSStatus hooked_SecItemDelete(CFDictionaryRef query);
 }
 
 - (NSDictionary *)dictionaryRepresentation {
+    if (DKGetAccountUserDefaultsRecursionGuard) return %orig;
+    
     DKAccountManager *manager = [DKAccountManager sharedManager];
     NSString *currentAccount = [manager currentAccountName];
     

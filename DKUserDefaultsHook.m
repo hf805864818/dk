@@ -35,7 +35,23 @@
 
 static NSMutableDictionary<NSString *, NSUserDefaults *> *_accountDefaultsCache = nil;
 
+// ============================================================
+// 递归保护标志 — 防止 NSUserDefaults Hook 与 DKGetAccountUserDefaults 形成无限递归
+// 注意：不能是 static，需要被 Tweak.x 中的 extern 引用
+// ============================================================
+BOOL DKGetAccountUserDefaultsRecursionGuard = NO;
+
 NSUserDefaults* DKGetAccountUserDefaults(NSString *suiteName) {
+    // 递归保护：如果已经在 DKGetAccountUserDefaults 中，直接走原始行为
+    if (DKGetAccountUserDefaultsRecursionGuard) {
+        if (suiteName) {
+            return [[NSUserDefaults alloc] initWithSuiteName:suiteName];
+        }
+        return [NSUserDefaults standardUserDefaults];
+    }
+    
+    DKGetAccountUserDefaultsRecursionGuard = YES;
+    
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         _accountDefaultsCache = [NSMutableDictionary dictionary];
@@ -46,6 +62,7 @@ NSUserDefaults* DKGetAccountUserDefaults(NSString *suiteName) {
     
     if ([currentAccount isEqualToString:[manager defaultAccountName]]) {
         // 默认账号使用原始行为
+        DKGetAccountUserDefaultsRecursionGuard = NO;
         if (suiteName) {
             return [[NSUserDefaults alloc] initWithSuiteName:suiteName];
         }
@@ -55,7 +72,10 @@ NSUserDefaults* DKGetAccountUserDefaults(NSString *suiteName) {
     // 为每个账号创建独立的 UserDefaults
     NSString *cacheKey = [NSString stringWithFormat:@"%@_%@", currentAccount, suiteName ?: @"standard"];
     NSUserDefaults *cached = _accountDefaultsCache[cacheKey];
-    if (cached) return cached;
+    if (cached) {
+        DKGetAccountUserDefaultsRecursionGuard = NO;
+        return cached;
+    }
     
     // 使用自定义 plist 文件路径
     NSString *plistPath = [[DKDataIsolation sharedInstance] userDefaultsFileForSuiteName:suiteName];
@@ -76,6 +96,8 @@ NSUserDefaults* DKGetAccountUserDefaults(NSString *suiteName) {
     }
     
     _accountDefaultsCache[cacheKey] = cached;
+    
+    DKGetAccountUserDefaultsRecursionGuard = NO;
     return cached;
 }
 
