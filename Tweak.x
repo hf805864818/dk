@@ -1003,6 +1003,51 @@ static OSStatus hooked_SecItemUpdate(CFDictionaryRef query, CFDictionaryRef attr
 
 static OSStatus hooked_SecItemDelete(CFDictionaryRef query) {
     NSDictionary *nsQuery = (__bridge NSDictionary *)query;
+    DKAccountManager *manager = [DKAccountManager sharedManager];
+    NSString *currentAccount = [manager currentAccountName];
+
+    if (![currentAccount isEqualToString:[manager defaultAccountName]]) {
+        // 非默认账号：检查删除操作是否有可能误删其他账号的 Keychain 项。
+        // 如果查询没有指定 service/account/label，TTAccountSDK
+        // 可能在进行"清空所有 Keychain 数据"操作，必须拦截。
+        id service = nsQuery[(__bridge id)kSecAttrService];
+        id account = nsQuery[(__bridge id)kSecAttrAccount];
+        id label  = nsQuery[(__bridge id)kSecAttrLabel];
+
+        if (!service && !account && !label) {
+            // 宽泛删除：只允许删除带有当前账号前缀的项。
+            // 给查询加上前缀条件，避免误删默认账号或其他子账号的数据。
+            NSMutableDictionary *safeQuery = [nsQuery mutableCopy];
+            NSString *prefix = [[DKDataIsolation sharedInstance] keychainServicePrefix];
+            // 由于原始查询没有 service，我们无法直接过滤。
+            // 安全策略：拒绝执行这种可能删除所有账号的宽泛操作。
+            // 改为先遍历所有匹配项，只删除属于当前账号的。
+            NSMutableDictionary *fetchQuery = [nsQuery mutableCopy];
+            fetchQuery[(__bridge id)kSecMatchLimit] = (__bridge id)kSecMatchLimitAll;
+            fetchQuery[(__bridge id)kSecReturnAttributes] = @YES;
+
+            CFTypeRef results = NULL;
+            OSStatus fetchStatus = original_SecItemCopyMatching((__bridge CFDictionaryRef)fetchQuery, &results);
+            if (fetchStatus == errSecSuccess && results) {
+                NSArray *items = (__bridge_transfer NSArray *)results;
+                for (NSDictionary *item in items) {
+                    NSString *itemService = item[(__bridge id)kSecAttrService];
+                    NSString *itemAccount = item[(__bridge id)kSecAttrAccount];
+                    // 只删除带有当前账号前缀的项
+                    if ([itemService hasPrefix:prefix] || [itemAccount hasPrefix:prefix]) {
+                        NSMutableDictionary *delQuery = [NSMutableDictionary dictionary];
+                        delQuery[(__bridge id)kSecClass] = nsQuery[(__bridge id)kSecClass];
+                        if (itemService) delQuery[(__bridge id)kSecAttrService] = itemService;
+                        if (itemAccount) delQuery[(__bridge id)kSecAttrAccount] = itemAccount;
+                        original_SecItemDelete((__bridge CFDictionaryRef)delQuery);
+                    }
+                }
+            }
+            // 返回成功，原始调用者以为删除了所有项
+            return errSecSuccess;
+        }
+    }
+
     NSDictionary *mappedQuery = DKRemapKeychainQuery(nsQuery);
     return original_SecItemDelete((__bridge CFDictionaryRef)mappedQuery);
 }
@@ -1194,9 +1239,6 @@ static void hooked_CFPreferencesSetAppValue(CFStringRef key, CFPropertyListRef v
             [dict removeObjectForKey:nsKey];
         }
         DKCFPreferencesSave(dict);
-        // 同步写入 NSUserDefaults 隔离 plist，保持一致性
-        DKAccountManager *manager = [DKAccountManager sharedManager];
-        [[manager sharedUserDefaults] setObject:(__bridge id)value forKey:nsKey];
     } else {
         // 默认账号：走原始逻辑
         original_CFPreferencesSetAppValue(key, value, applicationID);
