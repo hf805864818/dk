@@ -290,7 +290,13 @@ static char kDKHiddenIndicatorKey;
             return;
         }
         
-        [self hideFloatingButton];
+        // 直接同步移除旧按钮（不能用 hideFloatingButton，它异步，会移除刚创建的新按钮）
+        UIButton *existingButton = objc_getAssociatedObject(keyWindow, &kDKFloatingButtonKey);
+        if (existingButton) {
+            [existingButton removeFromSuperview];
+            objc_setAssociatedObject(keyWindow, &kDKFloatingButtonKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        self.isFloatingButtonVisible = NO;
         
         UIButton *button = [UIButton buttonWithType:UIButtonTypeCustom];
         CGFloat screenWidth = keyWindow.bounds.size.width;
