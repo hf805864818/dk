@@ -676,6 +676,25 @@ didReceiveNotificationResponse:(UNNotificationResponse *)response
 %end
 
 // ============================================================
+// POSIX Hook 函数前向声明（必须在 %ctor 之前，否则 Logos 报错）
+// ============================================================
+static BOOL _dk_fopen_hook_guard = NO;
+FILE* (*original_fopen)(const char *path, const char *mode);
+FILE* hooked_fopen(const char *path, const char *mode);
+
+static BOOL _dk_open_hook_guard = NO;
+int (*original_open)(const char *path, int flags, mode_t mode);
+int hooked_open(const char *path, int flags, mode_t mode);
+
+static BOOL _dk_stat_hook_guard = NO;
+int (*original_stat)(const char *path, struct stat *buf);
+int hooked_stat(const char *path, struct stat *buf);
+
+static BOOL _dk_access_hook_guard = NO;
+int (*original_access)(const char *path, int mode);
+int hooked_access(const char *path, int mode);
+
+// ============================================================
 // 构造函数 - 插件加载时调用
 // ============================================================
 %ctor {
@@ -810,24 +829,6 @@ static OSStatus hooked_SecItemDelete(CFDictionaryRef query) {
 // 这些底层调用不会被 Foundation 层的 %hook 拦截。
 // 通过 MSHookFunction 直接修改 fopen 的机器码指令，实现路径重定向。
 // ============================================================
-
-// 递归保护 — 防止 fopen 内部调用（如 NSString 的 UTF8String 转换）
-// 又触发 hooked_fopen 导致无限递归
-static BOOL _dk_fopen_hook_guard = NO;
-
-FILE* (*original_fopen)(const char *path, const char *mode);
-
-// POSIX open() — Flutter dart:io 二进制文件读写使用此函数
-static BOOL _dk_open_hook_guard = NO;
-int (*original_open)(const char *path, int flags, mode_t mode);
-
-// POSIX stat() — Flutter dart:io 文件存在性检查使用此函数
-static BOOL _dk_stat_hook_guard = NO;
-int (*original_stat)(const char *path, struct stat *buf);
-
-// POSIX access() — Flutter dart:io 文件可访问性检查使用此函数
-static BOOL _dk_access_hook_guard = NO;
-int (*original_access)(const char *path, int mode);
 
 FILE* hooked_fopen(const char *path, const char *mode) {
     // 递归保护：如果已经在 hooked_fopen 中，直接走原始实现
