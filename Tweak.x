@@ -124,14 +124,16 @@ static CFPropertyListRef hooked_CFPreferencesCopyAppValue(CFStringRef key, CFStr
 static Boolean hooked_CFPreferencesAppSynchronize(CFStringRef applicationID);
 
 // CFPreferences 隔离用 plist 路径
+// 与 NSUserDefaults Hook 共享同一个账号隔离 plist，
+// 避免 TRAE 直接调用 CFPreferences API 时数据落入不同文件，
+// 导致切换账号后登录态丢失。
 static NSString* DKCFPreferencesPlistPath(void) {
     DKAccountManager *manager = [DKAccountManager sharedManager];
     NSString *currentAccount = [manager currentAccountName];
     if ([currentAccount isEqualToString:[manager defaultAccountName]]) {
         return nil;
     }
-    NSString *accountPath = [manager dataPathForAccount:currentAccount];
-    return [accountPath stringByAppendingPathComponent:@"Library/Preferences/.dk_cfprefs.plist"];
+    return [[DKDataIsolation sharedInstance] userDefaultsFileForSuiteName:nil];
 }
 
 static NSMutableDictionary* DKCFPreferencesLoad(void) {
@@ -930,13 +932,13 @@ didReceiveNotificationResponse:(UNNotificationResponse *)response
               bundleID, currentAccount, isNonDefaultAccount ? @"YES" : @"NO",
               [[DKAccountManager sharedManager] accountsRootPath]);
 
-        // 用于在 Hook 安装后恢复原始 NSUserDefaults 的数据
-        __block NSDictionary *savedDefaultDomain = nil;
-
         if (isNonDefaultAccount) {
-            // 保存完整的原始 NSUserDefaults 域（包含默认账号的登录态等所有数据）
+            // 子账号启动：清空原始 NSUserDefaults 域，确保 App 看不到默认账号的登录态。
+            // 注意：这里只清空，不再把 savedDefaultDomain 写回原始域。
+            // 之前写回默认账号数据会导致子账号与默认账号状态混杂，
+            // 切回默认时 TRAE 可能检测到不一致而清除登录态。
             NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-            savedDefaultDomain = [defaults persistentDomainForName:bundleID];
+            NSDictionary *savedDefaultDomain = [defaults persistentDomainForName:bundleID];
 
             if (savedDefaultDomain) {
                 // 清空原始域 — 内存 + 磁盘 plist 全部清除
@@ -984,20 +986,12 @@ didReceiveNotificationResponse:(UNNotificationResponse *)response
         NSLog(@"[DK] fishhook C 函数 Hook 已安装（12 个：Keychain 4 + CFPreferences 3 + POSIX 5）");
 
         // ============================================
-        // 第三步：恢复原始 NSUserDefaults 域
-        // Hook 已安装，_dkStartupGuard 临时设为 YES 让写入穿透
+        // 第三步：关闭启动保护
+        // 子账号启动时不再把默认账号的 NSUserDefaults 写回原始域，
+        // 避免状态污染。子账号的所有配置都写入隔离 plist。
         // ============================================
-        if (isNonDefaultAccount && savedDefaultDomain) {
-            _dkStartupGuard = YES;  // 临时透传，写入原始 NSUserDefaults
-            NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-            [defaults setPersistentDomain:savedDefaultDomain forName:bundleID];
-            [defaults synchronize];
-            _dkStartupGuard = NO;   // 重新激活 Hook 隔离
-            NSLog(@"[DK] 子账号启动：已恢复原始 NSUserDefaults（%lu 个键），Hook 已激活",
-                  (unsigned long)savedDefaultDomain.count);
-        } else {
-            _dkStartupGuard = NO;
-        }
+        _dkStartupGuard = NO;
+        NSLog(@"[DK] 启动保护已关闭，账号隔离 Hook 已激活");
 
         // ============================================
         // 第四步：初始化各模块（dispatch_async 到主线程，确保 UI 操作安全）

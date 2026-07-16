@@ -4,6 +4,7 @@
 #import <UIKit/UIKit.h>
 #import <Security/Security.h>
 #import <CommonCrypto/CommonDigest.h>
+#import <unistd.h>
 
 // ============================================================
 // Keychain 备份校验和工具
@@ -231,12 +232,15 @@ static BOOL DKIsSessionRelatedDefaultsKey(NSString *key) {
 
     BOOL isDefaultAccount = [accountName isEqualToString:[manager defaultAccountName]];
     BOOL hasCookies = cookies.count > 0;
-    BOOL hasHeaders = headers.count > 0;
+    BOOL hasFullDomain = [headers[@"__DK_FULL_DOMAIN__"] isKindOfClass:[NSDictionary class]] &&
+                         [headers[@"__DK_FULL_DOMAIN__"] count] > 0;
     NSString *sessionPath = [self sessionPathForAccount:accountName];
 
-    if (isDefaultAccount && !hasCookies && !hasHeaders &&
+    // 默认账号：只有当捕获到完整域快照时才允许覆盖旧快照。
+    // 防止 NSUserDefaults 被意外清空时用空数据覆盖有效备份。
+    if (isDefaultAccount && !hasCookies && !hasFullDomain &&
         [[NSFileManager defaultManager] fileExistsAtPath:sessionPath]) {
-        NSLog(@"[DK] 默认账号当前未检测到有效会话，保留已有默认账号快照");
+        NSLog(@"[DK] 默认账号当前未检测到有效完整域快照，保留已有默认账号快照");
         return;
     }
 
@@ -253,6 +257,8 @@ static BOOL DKIsSessionRelatedDefaultsKey(NSString *key) {
                                                     error:nil];
 
     [sessionData writeToFile:sessionPath atomically:YES];
+    // 强制刷盘，避免 exit(0) 前数据丢失
+    sync();
     NSLog(@"[DK] 账号 %@ 的网络会话已备份", accountName);
 }
 
