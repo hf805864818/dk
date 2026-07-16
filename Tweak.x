@@ -77,6 +77,9 @@ static OSStatus hooked_SecItemDelete(CFDictionaryRef query);
 // ============================================================
 %ctor {
     @autoreleasepool {
+        // 初始化所有 %hook（必须！否则所有 %hook 都不会生效）
+        %init;
+        
         NSString *bundleID = DKGetCurrentBundleID();
         
         NSLog(@"========================================");
