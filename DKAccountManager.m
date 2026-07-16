@@ -10,6 +10,7 @@
 static NSString *const kDKAccountsKey = @"DK_Accounts_List";
 static NSString *const kDKCurrentAccountKey = @"DK_Current_Account";
 static NSString *const kDKDefaultAccountName = @"__DK_DEFAULT__";
+static NSString *const kDKCurrentAccountFile = @".dk_current_account";
 
 // ============================================================
 // 内部存储 — 使用 App Group 级别共享存储
@@ -50,17 +51,47 @@ static NSString *_accountsRootPath = nil;
         NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
         NSString *docPath = [paths firstObject];
         _accountsRootPath = [docPath stringByAppendingPathComponent:@"DKAccounts"];
-        
+
         // 确保目录存在
         NSFileManager *fm = [NSFileManager defaultManager];
         if (![fm fileExistsAtPath:_accountsRootPath]) {
             [fm createDirectoryAtPath:_accountsRootPath
-           withIntermediateDirectories:YES
-                            attributes:@{NSFileProtectionKey: NSFileProtectionNone}
-                                 error:nil];
+          withIntermediateDirectories:YES
+                           attributes:@{NSFileProtectionKey: NSFileProtectionNone}
+                                error:nil];
         }
     }
     return _accountsRootPath;
+}
+
+- (NSString *)_currentAccountFilePath {
+    return [self.accountsRootPath stringByAppendingPathComponent:kDKCurrentAccountFile];
+}
+
+- (void)_saveCurrentAccountToFile:(NSString *)accountName {
+    NSString *path = [self _currentAccountFilePath];
+    // 直接写入文件系统，不依赖 NSUserDefaults/cfprefsd，避免 exit(0) 前同步延迟丢失
+    NSError *error = nil;
+    [accountName writeToFile:path
+                  atomically:YES
+                    encoding:NSUTF8StringEncoding
+                       error:&error];
+    if (error) {
+        NSLog(@"[DK] 当前账号文件写入失败: %@", error);
+    }
+}
+
+- (NSString *)_currentAccountFromFile {
+    NSString *path = [self _currentAccountFilePath];
+    if (![[NSFileManager defaultManager] fileExistsAtPath:path]) return nil;
+    NSError *error = nil;
+    NSString *saved = [NSString stringWithContentsOfFile:path
+                                                encoding:NSUTF8StringEncoding
+                                                   error:&error];
+    if (error) {
+        NSLog(@"[DK] 当前账号文件读取失败: %@", error);
+    }
+    return saved;
 }
 
 - (NSString *)dataPathForAccount:(NSString *)accountName {
@@ -114,9 +145,15 @@ static NSString *_accountsRootPath = nil;
     // 重要：先临时设为默认账号，这样 NSUserDefaults Hook 的 objectForKey 走 %orig，
     // 读取原始 NSUserDefaults（而非某个账号的独立 plist），确保读到正确的保存状态
     _currentAccountName = kDKDefaultAccountName;
-    
-    // 读取上次活跃账号（从原始 NSUserDefaults 读取）
-    NSString *saved = [[NSUserDefaults standardUserDefaults] stringForKey:kDKCurrentAccountKey];
+
+    // 优先读取独立文件中的当前账号标记。
+    // exit(0) 前 cfprefsd 可能尚未把 NSUserDefaults 写入磁盘，导致状态丢失。
+    NSString *saved = [self _currentAccountFromFile];
+    if (!saved) {
+        // 兼容旧版本：回退到 NSUserDefaults
+        saved = [[NSUserDefaults standardUserDefaults] stringForKey:kDKCurrentAccountKey];
+    }
+
     if (saved) {
         if ([saved isEqualToString:kDKDefaultAccountName]) {
             _currentAccountName = kDKDefaultAccountName;
@@ -402,6 +439,9 @@ static NSString *_accountsRootPath = nil;
                                               forKey:kDKCurrentAccountKey];
     [[NSUserDefaults standardUserDefaults] synchronize];
     _isSwitching = previousSwitching;
+
+    // 同时写入独立文件，避免 exit(0) 时 cfprefsd 尚未落盘导致状态丢失。
+    [self _saveCurrentAccountToFile:_currentAccountName];
 }
 
 - (void)restoreStateForAccount:(NSString *)accountName {
