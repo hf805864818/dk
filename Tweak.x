@@ -436,13 +436,20 @@ static OSStatus hooked_SecItemDelete(CFDictionaryRef query);
 
 - (BOOL)synchronize {
     DKAccountManager *manager = [DKAccountManager sharedManager];
-    NSString *currentAccount = [manager currentAccountName];
+    // 切换中：直接调用原始实现（写入原始 NSUserDefaults）
+    if (manager.isSwitching) return %orig;
     
-    if (![currentAccount isEqualToString:[manager defaultAccountName]]) {
-        DKSyncAccountUserDefaults();
+    NSString *currentAccount = [manager currentAccountName];
+    // 默认账号：直接调用原始实现
+    if ([currentAccount isEqualToString:[manager defaultAccountName]]) {
+        return %orig;
     }
     
-    return %orig;
+    // 非默认账号：只同步账号独立 plist，不调用 %orig
+    // 原始 NSUserDefaults 的缓存从未被修改（所有写操作被重定向到账号 plist），
+    // 调用 %orig 可能触发系统内部机制意外覆盖原始数据
+    DKSyncAccountUserDefaults();
+    return YES;
 }
 
 - (NSDictionary *)dictionaryRepresentation {
@@ -456,6 +463,22 @@ static OSStatus hooked_SecItemDelete(CFDictionaryRef query);
     // 仅返回账号独立的 plist 数据（不合并原始数据）
     NSDictionary *accountDict = DKReadAccountUserDefaultsDictionary();
     return accountDict ?: @{};
+}
+
+// 防止 app 在非默认账号下重置标准 UserDefaults
++ (void)resetStandardUserDefaults {
+    DKAccountManager *manager = [DKAccountManager sharedManager];
+    if (manager.isSwitching) {
+        %orig;
+        return;
+    }
+    NSString *currentAccount = [manager currentAccountName];
+    if ([currentAccount isEqualToString:[manager defaultAccountName]]) {
+        %orig;
+        return;
+    }
+    // 非默认账号下忽略 resetStandardUserDefaults，保护原始数据
+    NSLog(@"[DK] 拦截 resetStandardUserDefaults（当前账号：%@）", currentAccount);
 }
 
 %end

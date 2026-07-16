@@ -67,6 +67,27 @@ NSDictionary* DKRemapKeychainQuery(NSDictionary *query) {
                                                           keychainAccessGroupForOriginalGroup:accessGroup];
     }
     
+    // 给 kSecAttrLabel 添加前缀（某些 app 使用 label 而非 service）
+    id label = query[(__bridge id)kSecAttrLabel];
+    if (label && [label isKindOfClass:[NSString class]]) {
+        mappedQuery[(__bridge id)kSecAttrLabel] = [prefix stringByAppendingString:label];
+    }
+    
+    // 给 kSecAttrGeneric 添加前缀（某些 app 使用 generic 属性）
+    id generic = query[(__bridge id)kSecAttrGeneric];
+    if (generic) {
+        // kSecAttrGeneric 是 CFDataRef，但这里我们只处理 NSString 和 NSData
+        if ([generic isKindOfClass:[NSString class]]) {
+            mappedQuery[(__bridge id)kSecAttrGeneric] = [prefix stringByAppendingString:generic];
+        } else if ([generic isKindOfClass:[NSData class]]) {
+            NSString *dataStr = [[NSString alloc] initWithData:generic encoding:NSUTF8StringEncoding];
+            if (dataStr) {
+                NSString *prefixed = [prefix stringByAppendingString:dataStr];
+                mappedQuery[(__bridge id)kSecAttrGeneric] = [prefixed dataUsingEncoding:NSUTF8StringEncoding];
+            }
+        }
+    }
+    
     return [mappedQuery copy];
 }
 
