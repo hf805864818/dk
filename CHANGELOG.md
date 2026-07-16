@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.0.17] - 2026-07-16
+
+- 94b9a7e fix: clear stale auth state when switching accounts
+
+
 ## [1.0.16] - 2026-07-16
 
 - 7108a09 fix: handle missing default snapshot after upgrade
