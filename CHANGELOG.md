@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.0.12] - 2026-07-16
+
+- cd02dfd fix: synchronize 非默认账号不调用 %orig; 添加 resetStandardUserDefaults 拦截; 添加 kSecAttrLabel/kSecAttrGeneric Keychain 映射
+
+
 ## [1.0.11] - 2026-07-16
 
 - d38dd1c fix: 修复refreshAccountList默认账号恢复逻辑 + saveCurrentState写入原NSUserDefaults
