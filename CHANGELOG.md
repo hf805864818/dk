@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.0.14] - 2026-07-16
+
+- 3a935bb fix: preserve default account session when switching
+
+
 ## [1.0.13] - 2026-07-16
 
 - 83c8753 fix: 添加 POSIX openat() Hook — 修复切换回默认账号后登录页问题
