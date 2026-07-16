@@ -1,6 +1,6 @@
 Package: com.dk.multiacount
 Name: DK Multi-Account
-Version: 1.0.5
+Version: 1.0.6
 Description: 多账号切换插件，支持 TRAE 等多应用。数据隔离 + 登录态保持 + 推送通知桥接
 Architecture: iphoneos-arm
 Maintainer: hf805864818
