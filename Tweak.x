@@ -717,6 +717,10 @@ static BOOL _dk_access_hook_guard = NO;
 int (*original_access)(const char *path, int mode);
 int hooked_access(const char *path, int mode);
 
+static BOOL _dk_openat_hook_guard = NO;
+int (*original_openat)(int fd, const char *path, int flags, mode_t mode);
+int hooked_openat(int fd, const char *path, int flags, mode_t mode);
+
 // ============================================================
 // 构造函数 - 插件加载时调用
 // ============================================================
@@ -765,6 +769,8 @@ int hooked_access(const char *path, int mode);
         NSLog(@"[DK] POSIX stat Hook 已安装");
         MSHookFunction((void *)access, (void *)hooked_access, (void **)&original_access);
         NSLog(@"[DK] POSIX access Hook 已安装");
+        MSHookFunction((void *)openat, (void *)hooked_openat, (void **)&original_openat);
+        NSLog(@"[DK] POSIX openat Hook 已安装");
         
         // 延迟启动 UI 层敏感词过滤绕过（等应用完全启动后）
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
@@ -971,5 +977,39 @@ int hooked_access(const char *path, int mode) {
     }
     
     _dk_access_hook_guard = NO;
+    return result;
+}
+
+// ============================================================
+// POSIX openat() Hook — 捕获 Flutter dart:io 的现代文件 I/O
+// Flutter 的 dart:io 在 iOS 上使用 openat() 而非 open() 系统调用。
+// 这是最关键的 Hook，因为 NSUserDefaults 的 plist 文件读写
+// 也可能通过 openat() 进行。没有这个 Hook，B 账号下 Flutter 引擎
+// 会直接读写原始文件，导致 A 的登录数据被覆盖。
+// ============================================================
+
+int hooked_openat(int fd, const char *path, int flags, mode_t mode) {
+    // 递归保护
+    if (_dk_openat_hook_guard) {
+        return original_openat(fd, path, flags, mode);
+    }
+    
+    _dk_openat_hook_guard = YES;
+    
+    int result = -1;
+    if (path) {
+        NSString *nsPath = [NSString stringWithUTF8String:path];
+        NSString *remapped = DKRemapFilePath(nsPath);
+        if (remapped && remapped != nsPath) {
+            const char *newPath = [remapped UTF8String];
+            result = original_openat(fd, newPath, flags, mode);
+        } else {
+            result = original_openat(fd, path, flags, mode);
+        }
+    } else {
+        result = original_openat(fd, path, flags, mode);
+    }
+    
+    _dk_openat_hook_guard = NO;
     return result;
 }
