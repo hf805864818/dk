@@ -11,6 +11,35 @@
 
 static BOOL DKSessionRestoreInProgress = NO;
 
+static NSArray<NSString *>* DKAuthHeaderKeys(void) {
+    return @[@"auth_token", @"access_token", @"refresh_token",
+             @"session_id", @"Authorization", @"Bearer",
+             @"x-auth-token", @"token",
+             @"uid", @"user_id", @"userId", @"account_id", @"accountId",
+             @"user", @"account", @"profile", @"jwt", @"credential"];
+}
+
+static BOOL DKIsSessionRelatedDefaultsKey(NSString *key) {
+    if (![key isKindOfClass:[NSString class]] || key.length == 0) {
+        return NO;
+    }
+
+    NSString *lowerKey = [key lowercaseString];
+    NSArray<NSString *> *keywords = @[
+        @"token", @"auth", @"session", @"login", @"jwt", @"bearer",
+        @"credential", @"uid", @"userid", @"user_id",
+        @"accountid", @"account_id", @"profile"
+    ];
+
+    for (NSString *keyword in keywords) {
+        if ([lowerKey containsString:keyword]) {
+            return YES;
+        }
+    }
+
+    return NO;
+}
+
 @implementation DKNetworkSessionManager
 
 + (instancetype)sharedInstance {
@@ -78,10 +107,10 @@ static BOOL DKSessionRestoreInProgress = NO;
 }
 
 - (void)restoreSessionForAccount:(NSString *)accountName {
-    [self restoreSessionForAccount:accountName clearCookiesIfMissing:NO];
+    [self restoreSessionForAccount:accountName clearSessionIfMissing:NO];
 }
 
-- (void)restoreSessionForAccount:(NSString *)accountName clearCookiesIfMissing:(BOOL)clearCookiesIfMissing {
+- (void)restoreSessionForAccount:(NSString *)accountName clearSessionIfMissing:(BOOL)clearSessionIfMissing {
     NSString *sessionPath = [self sessionPathForAccount:accountName];
     NSFileManager *fm = [NSFileManager defaultManager];
     
@@ -91,11 +120,11 @@ static BOOL DKSessionRestoreInProgress = NO;
         // 如果升级插件时当前在 B/C/D，默认账号可能没有快照；
         // 用户主动切回默认账号时也要清空子账号 Cookie，进入干净的默认账号环境。
         DKAccountManager *manager = [DKAccountManager sharedManager];
-        if (clearCookiesIfMissing ||
+        if (clearSessionIfMissing ||
             ![accountName isEqualToString:[manager defaultAccountName]]) {
             DKSessionRestoreInProgress = YES;
             @try {
-                [self _clearAllCookies];
+                [self _clearCurrentSessionState];
             } @finally {
                 DKSessionRestoreInProgress = NO;
             }
@@ -110,8 +139,8 @@ static BOOL DKSessionRestoreInProgress = NO;
     DKSessionRestoreInProgress = YES;
 
     @try {
-        // 恢复 Cookie 前先清理旧 Cookie，避免不同账号互相污染。
-        [self _clearAllCookies];
+        // 恢复前先清理旧登录态，避免不同账号互相污染。
+        [self _clearCurrentSessionState];
 
         // 恢复 Cookie
         NSArray *cookiesData = sessionData[@"cookies"];
@@ -303,15 +332,20 @@ static BOOL DKSessionRestoreInProgress = NO;
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     NSMutableDictionary *headers = [NSMutableDictionary dictionary];
     
-    // 常见的 Token 存储键
-    NSArray *possibleKeys = @[@"auth_token", @"access_token", @"refresh_token",
-                              @"session_id", @"Authorization", @"Bearer",
-                              @"x-auth-token", @"token"];
-    
-    for (NSString *key in possibleKeys) {
+    for (NSString *key in DKAuthHeaderKeys()) {
         id value = [defaults objectForKey:key];
         if (value) {
             headers[key] = value;
+        }
+    }
+
+    NSDictionary *allDefaults = [defaults dictionaryRepresentation];
+    for (NSString *key in allDefaults) {
+        if (DKIsSessionRelatedDefaultsKey(key)) {
+            id value = allDefaults[key];
+            if (value) {
+                headers[key] = value;
+            }
         }
     }
     
@@ -320,10 +354,32 @@ static BOOL DKSessionRestoreInProgress = NO;
 
 - (void)_restoreAuthHeaders:(NSDictionary *)headers {
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    [self _clearAuthHeaders];
     for (NSString *key in headers) {
         [defaults setObject:headers[key] forKey:key];
     }
     [defaults synchronize];
+}
+
+- (void)_clearAuthHeaders {
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    for (NSString *key in DKAuthHeaderKeys()) {
+        [defaults removeObjectForKey:key];
+    }
+
+    NSDictionary *allDefaults = [defaults dictionaryRepresentation];
+    for (NSString *key in allDefaults) {
+        if (DKIsSessionRelatedDefaultsKey(key)) {
+            [defaults removeObjectForKey:key];
+        }
+    }
+
+    [defaults synchronize];
+}
+
+- (void)_clearCurrentSessionState {
+    [self _clearAllCookies];
+    [self _clearAuthHeaders];
 }
 
 #pragma mark - URLSession 配置管理

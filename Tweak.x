@@ -521,7 +521,12 @@ static OSStatus hooked_SecItemDelete(CFDictionaryRef query);
     // 恢复当前账号的会话状态
     DKAccountManager *manager = [DKAccountManager sharedManager];
     NSString *currentAccount = [manager currentAccountName];
-    [[DKNetworkSessionManager sharedManager] restoreSessionForAccount:currentAccount];
+    DKNetworkSessionManager *sessionManager = [DKNetworkSessionManager sharedManager];
+    BOOL shouldClearMissingDefaultSession =
+        [currentAccount isEqualToString:[manager defaultAccountName]] &&
+        ![sessionManager hasSessionSnapshotForAccount:[manager defaultAccountName]];
+    [sessionManager restoreSessionForAccount:currentAccount
+                       clearSessionIfMissing:shouldClearMissingDefaultSession];
 }
 
 - (void)applicationDidEnterBackground:(UIApplication *)application {

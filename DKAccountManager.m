@@ -243,8 +243,8 @@ static NSString *_accountsRootPath = nil;
         [[DKNetworkSessionManager sharedManager] snapshotDefaultSessionIfActive];
     } else if (switchingToDefaultWithoutSnapshot) {
         // 升级插件时如果当前已在 B/C/D，默认账号无法被自动快照。
-        // 用户主动切回默认账号时，不要继续沿用子账号 Cookie。
-        NSLog(@"[DK] 默认账号暂无快照，切回默认账号时将清理当前子账号 Cookie");
+        // 用户主动切回默认账号时，不要继续沿用子账号登录态。
+        NSLog(@"[DK] 默认账号暂无快照，切回默认账号时将清理当前子账号登录态");
     }
     
     // 1. 保存当前账号的网络会话状态
@@ -268,7 +268,7 @@ static NSString *_accountsRootPath = nil;
     // 5. 恢复目标账号的网络会话
     // 此时 isSwitching 必须为 NO，才能让非默认账号恢复到自己的隔离存储。
     [[DKNetworkSessionManager sharedManager] restoreSessionForAccount:name
-                                                clearCookiesIfMissing:switchingToDefaultWithoutSnapshot];
+                                                clearSessionIfMissing:switchingToDefaultWithoutSnapshot];
     
     // 6. 通知数据隔离层刷新
     [[DKDataIsolation sharedInstance] setup];

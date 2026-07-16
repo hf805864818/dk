@@ -28,8 +28,8 @@
 /// 恢复指定账号的网络会话状态
 - (void)restoreSessionForAccount:(NSString *)accountName;
 
-/// 恢复指定账号的网络会话状态；缺少快照时可选择清空当前 Cookie
-- (void)restoreSessionForAccount:(NSString *)accountName clearCookiesIfMissing:(BOOL)clearCookiesIfMissing;
+/// 恢复指定账号的网络会话状态；缺少快照时可选择清空当前登录会话
+- (void)restoreSessionForAccount:(NSString *)accountName clearSessionIfMissing:(BOOL)clearSessionIfMissing;
 
 /// 为指定账号备份网络会话数据
 - (void)backupSessionForAccount:(NSString *)accountName;
