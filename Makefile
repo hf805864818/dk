@@ -49,10 +49,10 @@ dk_OBJCFLAGS = -fobjc-arc -Wno-error -I. \
 
 # 链接框架（新增 UserNotifications）
 dk_FRAMEWORKS = UIKit Foundation Security CoreGraphics UserNotifications
-dk_PRIVATE_FRAMEWORKS = AppSupport
+# 注：AppSupport 私有框架在 iOS SDK 中不存在，已移除
 
-# 链接库
-dk_LDFLAGS = -lobjc -lsubstrate
+# 链接库（-lobjc 由 Theos 自动添加，无需重复）
+dk_LDFLAGS = -lsubstrate
 
 # 安装路径
 dk_INSTALL_PATH = /Library/MobileSubstrate/DynamicLibraries
