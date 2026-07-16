@@ -60,6 +60,14 @@ NSString* DKGetBuildTime(void) {
 }
 
 // ============================================================
+// Keychain C 函数 Hook 前向声明（定义在文件后面）
+// ============================================================
+static OSStatus hooked_SecItemAdd(CFDictionaryRef query, CFTypeRef *result);
+static OSStatus hooked_SecItemCopyMatching(CFDictionaryRef query, CFTypeRef *result);
+static OSStatus hooked_SecItemUpdate(CFDictionaryRef query, CFDictionaryRef attributesToUpdate);
+static OSStatus hooked_SecItemDelete(CFDictionaryRef query);
+
+// ============================================================
 // 构造函数 - 插件加载时调用
 // ============================================================
 %ctor {
@@ -305,7 +313,8 @@ NSString* DKGetBuildTime(void) {
     }
     
     // 合并账号数据和原始数据
-    NSMutableDictionary *merged = [%orig mutableCopy];
+    id origDict = %orig;
+    NSMutableDictionary *merged = [origDict mutableCopy];
     NSUserDefaults *accountDefaults = DKGetAccountUserDefaults(nil);
     NSDictionary *accountDict = [accountDefaults dictionaryRepresentation];
     [merged addEntriesFromDictionary:accountDict];
