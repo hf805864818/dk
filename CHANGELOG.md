@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.0.1] - 2026-07-16
+
+- 94bce4a fix: 全面修复编译问题
+- 6a722c9 fix: DKPushNotificationBridge 头文件导入 + 常量名修正
+- 0f74b5b fix: DKNetworkSessionManager.m 缺少 UIKit 头文件导入
+- edb42db fix: 将 original_SecItem* 声明移到 %ctor 之前
+- f5fe60c fix: 修复 2 个 Logos 编译错误
+- cfba7ff fix: 修复 4 类 Theos/Logos 编译错误
+- ac590b6 fix: 修复 CI 编译失败 + 敏感词过滤绕过添加独立开关
+- 7c3b581 feat: 新增敏感词过滤绕过模块 (DKContentFilterBypass)
+- 0b44793 feat: 版本号自动注入编译二进制
+- 32413ef fix: 优化 GitHub Actions CI/CD 配置
+
+
 All notable changes to DK Multi-Account Tweak will be documented in this file.
 
 ## [1.0.0] - 2026-07-16
