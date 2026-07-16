@@ -288,6 +288,9 @@ static NSString *_accountsRootPath = nil;
         // 从默认账号切到 B/C 等账号前，再强制保存一次默认账号快照。
         // 这是最关键的保险点，避免默认账号没有快照导致切回时进入登录页。
         [[DKNetworkSessionManager sharedManager] snapshotDefaultSessionIfActive];
+        // 同时备份默认账号的 Keychain 数据。
+        // TTAccountSDK 在子账号登录时可能误删/覆盖默认账号 Keychain 项。
+        [[DKNetworkSessionManager sharedManager] backupDefaultAccountKeychain];
     } else if (switchingToDefaultWithoutSnapshot) {
         // 升级插件时如果当前已在 B/C/D，默认账号无法被自动快照。
         // 用户主动切回默认账号时，不要继续沿用子账号登录态。
@@ -320,6 +323,11 @@ static NSString *_accountsRootPath = nil;
     
     // 5. 恢复目标账号的网络会话
     // 此时 isSwitching 必须为 NO，才能让非默认账号恢复到自己的隔离存储。
+    if ([name isEqualToString:kDKDefaultAccountName]) {
+        // 切回默认账号时，先恢复默认账号 Keychain 数据。
+        // 子账号登录过程中 TTAccountSDK 可能误删了默认账号的 Keychain 项。
+        [[DKNetworkSessionManager sharedManager] restoreDefaultAccountKeychain];
+    }
     [[DKNetworkSessionManager sharedManager] restoreSessionForAccount:name
                                                 clearSessionIfMissing:switchingToDefaultWithoutSnapshot];
     

@@ -43,4 +43,10 @@
 /// 定期刷新所有账号的会话（保持在线）
 - (void)scheduleSessionRefresh;
 
+/// 备份默认账号 Keychain 数据（切换前保存）
+- (void)backupDefaultAccountKeychain;
+
+/// 恢复默认账号 Keychain 数据（切回默认账号时）
+- (void)restoreDefaultAccountKeychain;
+
 @end

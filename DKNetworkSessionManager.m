@@ -62,13 +62,13 @@ static BOOL DKIsSessionRelatedDefaultsKey(NSString *key) {
                                              selector:@selector(_applicationDidEnterBackground)
                                                  name:UIApplicationDidEnterBackgroundNotification
                                                object:nil];
-    
+
     // 监听应用即将终止
     [[NSNotificationCenter defaultCenter] addObserver:self
                                              selector:@selector(_applicationWillTerminate)
                                                  name:UIApplicationWillTerminateNotification
                                                object:nil];
-    
+
     NSLog(@"[DK] 网络会话管理器已初始化");
 }
 
@@ -126,7 +126,7 @@ static BOOL DKIsSessionRelatedDefaultsKey(NSString *key) {
 - (void)restoreSessionForAccount:(NSString *)accountName clearSessionIfMissing:(BOOL)clearSessionIfMissing {
     NSString *sessionPath = [self sessionPathForAccount:accountName];
     NSFileManager *fm = [NSFileManager defaultManager];
-    
+
     if (![fm fileExistsAtPath:sessionPath]) {
         NSLog(@"[DK] 账号 %@ 没有已保存的会话数据", accountName);
         // 新增的非默认账号没有会话时，清空当前 Cookie，避免沿用上一个账号。
@@ -144,11 +144,11 @@ static BOOL DKIsSessionRelatedDefaultsKey(NSString *key) {
         }
         return;
     }
-    
+
     // 读取会话数据
     NSDictionary *sessionData = [NSDictionary dictionaryWithContentsOfFile:sessionPath];
     if (!sessionData) return;
-    
+
     DKSessionRestoreInProgress = YES;
 
     @try {
@@ -185,26 +185,26 @@ static BOOL DKIsSessionRelatedDefaultsKey(NSString *key) {
     } @finally {
         DKSessionRestoreInProgress = NO;
     }
-    
+
     NSLog(@"[DK] 账号 %@ 的网络会话已恢复", accountName);
 }
 
 - (void)backupSessionForAccount:(NSString *)accountName {
     DKAccountManager *manager = [DKAccountManager sharedManager];
     NSMutableDictionary *sessionData = [NSMutableDictionary dictionary];
-    
+
     // 备份 Cookie
     NSArray *cookies = [self _captureCookies];
     if (cookies) {
         sessionData[@"cookies"] = cookies;
     }
-    
+
     // 备份 HTTP 头部
     NSDictionary *headers = [self _captureAuthHeaders];
     if (headers) {
         sessionData[@"authHeaders"] = headers;
     }
-    
+
     // 备份 NSURLSession 配置
     NSData *configData = [self _captureSessionConfig];
     if (configData) {
@@ -221,11 +221,11 @@ static BOOL DKIsSessionRelatedDefaultsKey(NSString *key) {
         NSLog(@"[DK] 默认账号当前未检测到有效会话，保留已有默认账号快照");
         return;
     }
-    
+
     // 保存时间戳
     sessionData[@"backupTime"] = [NSDate date];
     sessionData[@"accountName"] = accountName;
-    
+
     // 写入文件
     // 确保目录存在
     NSString *sessionDir = [sessionPath stringByDeletingLastPathComponent];
@@ -233,7 +233,7 @@ static BOOL DKIsSessionRelatedDefaultsKey(NSString *key) {
                               withIntermediateDirectories:YES
                                                attributes:nil
                                                     error:nil];
-    
+
     [sessionData writeToFile:sessionPath atomically:YES];
     NSLog(@"[DK] 账号 %@ 的网络会话已备份", accountName);
 }
@@ -256,7 +256,7 @@ static BOOL DKIsSessionRelatedDefaultsKey(NSString *key) {
                                       block:^(NSTimer *timer) {
         [self _refreshAllSessions];
     }];
-    
+
     NSLog(@"[DK] 会话定期刷新已启动（每30分钟）");
 }
 
@@ -284,24 +284,24 @@ static BOOL DKIsSessionRelatedDefaultsKey(NSString *key) {
     // 发送轻量心跳请求保持 Token 活跃
     // 具体实现取决于目标应用的后端 API
     // 这里提供框架，实际 API 端点需要根据 TRAE 后端调整
-    
+
     NSString *sessionPath = [self sessionPathForAccount:accountName];
     NSDictionary *sessionData = [NSDictionary dictionaryWithContentsOfFile:sessionPath];
     if (!sessionData) return;
-    
+
     NSDictionary *headers = sessionData[@"authHeaders"];
     if (!headers) return;
-    
+
     // 发送心跳请求
     NSURL *url = [NSURL URLWithString:@"https://api.trae.ai/heartbeat"];
     NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
     request.HTTPMethod = @"POST";
     request.timeoutInterval = 10;
-    
+
     for (NSString *key in headers) {
         [request setValue:headers[key] forHTTPHeaderField:key];
     }
-    
+
     NSURLSession *session = [NSURLSession sharedSession];
     [[session dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
         if (error) {
@@ -325,7 +325,7 @@ static BOOL DKIsSessionRelatedDefaultsKey(NSString *key) {
 - (NSArray *)_captureCookies {
     NSHTTPCookieStorage *storage = [NSHTTPCookieStorage sharedHTTPCookieStorage];
     NSArray *cookies = [storage cookies];
-    
+
     NSMutableArray *cookieDataList = [NSMutableArray array];
     for (NSHTTPCookie *cookie in cookies) {
         NSDictionary *props = [cookie properties];
@@ -333,13 +333,13 @@ static BOOL DKIsSessionRelatedDefaultsKey(NSString *key) {
             [cookieDataList addObject:props];
         }
     }
-    
+
     return cookieDataList;
 }
 
 - (void)_restoreCookiesFromData:(NSArray *)cookieDataList {
     NSHTTPCookieStorage *storage = [NSHTTPCookieStorage sharedHTTPCookieStorage];
-    
+
     for (NSDictionary *props in cookieDataList) {
         NSHTTPCookie *cookie = [NSHTTPCookie cookieWithProperties:props];
         if (cookie) {
@@ -354,7 +354,7 @@ static BOOL DKIsSessionRelatedDefaultsKey(NSString *key) {
     // 从 NSUserDefaults 或 Keychain 中读取认证信息
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     NSMutableDictionary *headers = [NSMutableDictionary dictionary];
-    
+
     for (NSString *key in DKAuthHeaderKeys()) {
         id value = [defaults objectForKey:key];
         if (value) {
@@ -371,7 +371,7 @@ static BOOL DKIsSessionRelatedDefaultsKey(NSString *key) {
             }
         }
     }
-    
+
     return headers;
 }
 
@@ -418,7 +418,7 @@ static BOOL DKIsSessionRelatedDefaultsKey(NSString *key) {
 - (NSData *)_captureSessionConfig {
     NSURLSessionConfiguration *config = [NSURLSessionConfiguration defaultSessionConfiguration];
     NSMutableDictionary *configDict = [NSMutableDictionary dictionary];
-    
+
     if (config.HTTPAdditionalHeaders) {
         configDict[@"HTTPAdditionalHeaders"] = config.HTTPAdditionalHeaders;
     }
@@ -427,7 +427,7 @@ static BOOL DKIsSessionRelatedDefaultsKey(NSString *key) {
     }
     configDict[@"timeoutIntervalForRequest"] = @(config.timeoutIntervalForRequest);
     configDict[@"timeoutIntervalForResource"] = @(config.timeoutIntervalForResource);
-    
+
     return [NSKeyedArchiver archivedDataWithRootObject:configDict requiringSecureCoding:NO error:nil];
 }
 
@@ -436,9 +436,9 @@ static BOOL DKIsSessionRelatedDefaultsKey(NSString *key) {
                                                                   fromData:configData
                                                                      error:nil];
     if (!configDict) return;
-    
+
     NSURLSessionConfiguration *config = [NSURLSessionConfiguration defaultSessionConfiguration];
-    
+
     NSDictionary *headers = configDict[@"HTTPAdditionalHeaders"];
     if (headers) {
         config.HTTPAdditionalHeaders = headers;
@@ -449,6 +449,140 @@ static BOOL DKIsSessionRelatedDefaultsKey(NSString *key) {
     if ([configDict[@"timeoutIntervalForResource"] doubleValue] > 0) {
         config.timeoutIntervalForResource = [configDict[@"timeoutIntervalForResource"] doubleValue];
     }
+}
+
+// ============================================================
+// 默认账号 Keychain 备份/恢复
+// 切换前保存默认账号所有 Keychain 项（无 DK_ 前缀），
+// 切回默认账号时恢复。防止 TTAccountSDK 在子账号登录
+// 时误删或覆盖默认账号的 Keychain 数据。
+// ============================================================
+
+- (void)backupDefaultAccountKeychain {
+    NSLog(@"[DK] 备份默认账号 Keychain 数据...");
+
+    // 使用全局查询获取所有未带 DK_ 前缀的 Keychain 项
+    NSDictionary *query = @{
+        (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
+        (__bridge id)kSecMatchLimit: (__bridge id)kSecMatchLimitAll,
+        (__bridge id)kSecReturnAttributes: @YES,
+        (__bridge id)kSecReturnData: @YES,
+    };
+
+    CFTypeRef result = NULL;
+    OSStatus status = SecItemCopyMatching((__bridge CFDictionaryRef)query, &result);
+
+    if (status != errSecSuccess || !result) {
+        NSLog(@"[DK] 默认账号 Keychain 查询失败或无数据");
+        return;
+    }
+
+    NSArray *items = (__bridge_transfer NSArray *)result;
+    NSMutableArray *filteredItems = [NSMutableArray array];
+
+    for (NSDictionary *item in items) {
+        NSString *service = item[(__bridge id)kSecAttrService];
+        NSString *account = item[(__bridge id)kSecAttrAccount];
+
+        // 跳过已有 DK_ 前缀的子账号 Keychain 项
+        if ([service hasPrefix:@"DK_"] || [account hasPrefix:@"DK_"]) {
+            continue;
+        }
+        [filteredItems addObject:item];
+    }
+
+    if (filteredItems.count == 0) {
+        NSLog(@"[DK] 默认账号无有效 Keychain 项");
+        return;
+    }
+
+    // 保存到默认账号快照目录
+    NSString *snapshotPath = [self sessionPathForAccount:@"__default_keychain__"];
+    NSString *dir = [snapshotPath stringByDeletingLastPathComponent];
+    [[NSFileManager defaultManager] createDirectoryAtPath:dir
+                              withIntermediateDirectories:YES
+                                               attributes:nil
+                                                    error:nil];
+
+    NSData *archivedData = [NSKeyedArchiver archivedDataWithRootObject:filteredItems
+                                                 requiringSecureCoding:NO
+                                                                 error:nil];
+    [archivedData writeToFile:snapshotPath atomically:YES];
+    NSLog(@"[DK] 默认账号 Keychain 已备份 %lu 项", (unsigned long)filteredItems.count);
+}
+
+- (void)restoreDefaultAccountKeychain {
+    NSLog(@"[DK] 恢复默认账号 Keychain 数据...");
+
+    NSString *snapshotPath = [self sessionPathForAccount:@"__default_keychain__"];
+    NSData *archivedData = [NSData dataWithContentsOfFile:snapshotPath];
+
+    if (!archivedData) {
+        NSLog(@"[DK] 默认账号 Keychain 备份不存在，跳过恢复");
+        return;
+    }
+
+    NSError *error = nil;
+    NSArray *items = [NSKeyedUnarchiver unarchivedObjectOfClass:[NSArray class]
+                                                       fromData:archivedData
+                                                          error:&error];
+    if (!items || error) {
+        NSLog(@"[DK] 默认账号 Keychain 备份解档失败: %@", error);
+        return;
+    }
+
+    NSInteger restored = 0;
+    for (NSDictionary *item in items) {
+        NSString *service = item[(__bridge id)kSecAttrService];
+        NSString *account = item[(__bridge id)kSecAttrAccount];
+        NSData *data = item[(__bridge id)kSecValueData];
+
+        if (!service) continue;
+
+        // 先删除旧项
+        NSDictionary *delQuery = @{
+            (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
+            (__bridge id)kSecAttrService: service,
+        };
+        if (account) {
+            NSMutableDictionary *mDel = [delQuery mutableCopy];
+            mDel[(__bridge id)kSecAttrAccount] = account;
+            delQuery = mDel;
+        }
+        SecItemDelete((__bridge CFDictionaryRef)delQuery);
+
+        // 写入新项
+        NSMutableDictionary *addQuery = [NSMutableDictionary dictionary];
+        addQuery[(__bridge id)kSecClass] = (__bridge id)kSecClassGenericPassword;
+        addQuery[(__bridge id)kSecAttrService] = service;
+        if (account) {
+            addQuery[(__bridge id)kSecAttrAccount] = account;
+        }
+        if (data) {
+            addQuery[(__bridge id)kSecValueData] = data;
+        }
+        // 保留其他属性
+        if (item[(__bridge id)kSecAttrLabel]) {
+            addQuery[(__bridge id)kSecAttrLabel] = item[(__bridge id)kSecAttrLabel];
+        }
+        if (item[(__bridge id)kSecAttrGeneric]) {
+            addQuery[(__bridge id)kSecAttrGeneric] = item[(__bridge id)kSecAttrGeneric];
+        }
+        if (item[(__bridge id)kSecAttrAccessGroup]) {
+            addQuery[(__bridge id)kSecAttrAccessGroup] = item[(__bridge id)kSecAttrAccessGroup];
+        }
+        if (item[(__bridge id)kSecAttrAccessible]) {
+            addQuery[(__bridge id)kSecAttrAccessible] = item[(__bridge id)kSecAttrAccessible];
+        }
+
+        OSStatus addStatus = SecItemAdd((__bridge CFDictionaryRef)addQuery, NULL);
+        if (addStatus == errSecSuccess) {
+            restored++;
+        } else {
+            NSLog(@"[DK] Keychain 恢复失败 service=%@ status=%d", service, (int)addStatus);
+        }
+    }
+    NSLog(@"[DK] 默认账号 Keychain 已恢复 %ld 项", (long)restored);
 }
 
 @end

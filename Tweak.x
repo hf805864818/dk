@@ -84,6 +84,48 @@ static OSStatus hooked_SecItemUpdate(CFDictionaryRef query, CFDictionaryRef attr
 static OSStatus hooked_SecItemDelete(CFDictionaryRef query);
 
 // ============================================================
+// CFPreferences C 函数 Hook 前向声明
+// TTAccountSDK 可能通过 CFPreferencesSetAppValue 直接写入
+// 原始 UserDefaults plist，绕过 NSUserDefaults Hook。
+// ============================================================
+static void (*original_CFPreferencesSetAppValue)(CFStringRef key, CFPropertyListRef value, CFStringRef applicationID);
+static CFPropertyListRef (*original_CFPreferencesCopyAppValue)(CFStringRef key, CFStringRef applicationID);
+static Boolean (*original_CFPreferencesAppSynchronize)(CFStringRef applicationID);
+
+static void hooked_CFPreferencesSetAppValue(CFStringRef key, CFPropertyListRef value, CFStringRef applicationID);
+static CFPropertyListRef hooked_CFPreferencesCopyAppValue(CFStringRef key, CFStringRef applicationID);
+static Boolean hooked_CFPreferencesAppSynchronize(CFStringRef applicationID);
+
+// CFPreferences 隔离用 plist 路径
+static NSString* DKCFPreferencesPlistPath(void) {
+    DKAccountManager *manager = [DKAccountManager sharedManager];
+    NSString *currentAccount = [manager currentAccountName];
+    if ([currentAccount isEqualToString:[manager defaultAccountName]]) {
+        return nil;
+    }
+    NSString *accountPath = [manager dataPathForAccount:currentAccount];
+    return [accountPath stringByAppendingPathComponent:@"Library/Preferences/.dk_cfprefs.plist"];
+}
+
+static NSMutableDictionary* DKCFPreferencesLoad(void) {
+    NSString *path = DKCFPreferencesPlistPath();
+    if (!path) return nil;
+    NSDictionary *dict = [NSDictionary dictionaryWithContentsOfFile:path];
+    return dict ? [dict mutableCopy] : [NSMutableDictionary dictionary];
+}
+
+static void DKCFPreferencesSave(NSMutableDictionary *dict) {
+    NSString *path = DKCFPreferencesPlistPath();
+    if (!path) return;
+    NSString *dir = [path stringByDeletingLastPathComponent];
+    [[NSFileManager defaultManager] createDirectoryAtPath:dir
+                              withIntermediateDirectories:YES
+                                               attributes:nil
+                                                    error:nil];
+    [dict writeToFile:path atomically:YES];
+}
+
+// ============================================================
 // Hook 1: NSFileManager - 文件路径重定向
 // 拦截所有文件操作，将路径映射到当前账号数据目录
 // ============================================================
@@ -401,7 +443,7 @@ static BOOL DKShouldUseOriginalDefaults(void) {
     if (DKShouldUseOriginalDefaults()) {
         return %orig;
     }
-    
+
     // 仅从账号独立的 plist 读取（不 fallback 到 %orig，实现真正隔离）
     return DKReadAccountUserDefault(defaultName);
 }
@@ -467,7 +509,7 @@ static BOOL DKShouldUseOriginalDefaults(void) {
         %orig;
         return;
     }
-    
+
     // 仅写入账号独立的 plist（不写入原始 NSUserDefaults，实现真正隔离）
     DKWriteAccountUserDefault(defaultName, value);
 }
@@ -517,7 +559,7 @@ static BOOL DKShouldUseOriginalDefaults(void) {
         %orig;
         return;
     }
-    
+
     // 仅从账号独立的 plist 移除
     DKWriteAccountUserDefault(defaultName, nil);
 }
@@ -526,7 +568,7 @@ static BOOL DKShouldUseOriginalDefaults(void) {
     if (DKShouldUseOriginalDefaults()) {
         return %orig;
     }
-    
+
     // 非默认账号：只同步账号独立 plist，不调用 %orig
     // 原始 NSUserDefaults 的缓存从未被修改（所有写操作被重定向到账号 plist），
     // 调用 %orig 可能触发系统内部机制意外覆盖原始数据
@@ -538,7 +580,7 @@ static BOOL DKShouldUseOriginalDefaults(void) {
     if (DKShouldUseOriginalDefaults()) {
         return %orig;
     }
-    
+
     // 仅返回账号独立的 plist 数据（不合并原始数据）
     NSDictionary *accountDict = DKReadAccountUserDefaultsDictionary();
     return accountDict ?: @{};
@@ -596,7 +638,7 @@ static BOOL DKShouldUseOriginalDefaults(void) {
 
 - (void)applicationDidBecomeActive:(UIApplication *)application {
     %orig;
-    
+
     // 恢复当前账号的会话状态
     DKAccountManager *manager = [DKAccountManager sharedManager];
     NSString *currentAccount = [manager currentAccountName];
@@ -612,7 +654,7 @@ static BOOL DKShouldUseOriginalDefaults(void) {
     // 进入后台前保存会话
     [[DKNetworkSessionManager sharedManager] saveCurrentSession];
     [[DKAccountManager sharedManager] saveCurrentState];
-    
+
     %orig;
 }
 
@@ -620,7 +662,7 @@ static BOOL DKShouldUseOriginalDefaults(void) {
     // 终止前保存所有状态
     [[DKNetworkSessionManager sharedManager] saveCurrentSession];
     [[DKAccountManager sharedManager] saveCurrentState];
-    
+
     %orig;
 }
 
@@ -631,7 +673,7 @@ static BOOL DKShouldUseOriginalDefaults(void) {
 didRegisterForRemoteNotificationsWithDeviceToken:(NSData *)deviceToken {
     // 记录 deviceToken
     [[DKPushNotificationBridge sharedInstance] registerDeviceToken:deviceToken];
-    
+
     // 调用原始方法
     %orig;
 }
@@ -648,11 +690,11 @@ didFailToRegisterForRemoteNotificationsWithError:(NSError *)error {
 - (void)application:(UIApplication *)application
 didReceiveRemoteNotification:(NSDictionary *)userInfo
 fetchCompletionHandler:(void (^)(UIBackgroundFetchResult))completionHandler {
-    
+
     // 通过桥接模块处理推送
     [[DKPushNotificationBridge sharedInstance] handleRemoteNotification:userInfo
                                                        completionHandler:completionHandler];
-    
+
     // 也调用原始方法
     %orig;
 }
@@ -668,43 +710,43 @@ fetchCompletionHandler:(void (^)(UIBackgroundFetchResult))completionHandler {
 
 + (NSURLSessionConfiguration *)defaultSessionConfiguration {
     NSURLSessionConfiguration *config = %orig;
-    
+
     DKAccountManager *manager = [DKAccountManager sharedManager];
     NSString *currentAccount = [manager currentAccountName];
-    
+
     if (![currentAccount isEqualToString:[manager defaultAccountName]]) {
         NSString *sessionPath = [[DKNetworkSessionManager sharedManager] sessionPathForAccount:currentAccount];
         NSDictionary *sessionData = [NSDictionary dictionaryWithContentsOfFile:sessionPath];
         NSDictionary *headers = sessionData[@"authHeaders"];
-        
+
         if (headers) {
             NSMutableDictionary *allHeaders = [config.HTTPAdditionalHeaders mutableCopy] ?: [NSMutableDictionary dictionary];
             [allHeaders addEntriesFromDictionary:headers];
             config.HTTPAdditionalHeaders = allHeaders;
         }
     }
-    
+
     return config;
 }
 
 + (NSURLSessionConfiguration *)ephemeralSessionConfiguration {
     NSURLSessionConfiguration *config = %orig;
-    
+
     DKAccountManager *manager = [DKAccountManager sharedManager];
     NSString *currentAccount = [manager currentAccountName];
-    
+
     if (![currentAccount isEqualToString:[manager defaultAccountName]]) {
         NSString *sessionPath = [[DKNetworkSessionManager sharedManager] sessionPathForAccount:currentAccount];
         NSDictionary *sessionData = [NSDictionary dictionaryWithContentsOfFile:sessionPath];
         NSDictionary *headers = sessionData[@"authHeaders"];
-        
+
         if (headers) {
             NSMutableDictionary *allHeaders = [config.HTTPAdditionalHeaders mutableCopy] ?: [NSMutableDictionary dictionary];
             [allHeaders addEntriesFromDictionary:headers];
             config.HTTPAdditionalHeaders = allHeaders;
         }
     }
-    
+
     return config;
 }
 
@@ -721,10 +763,10 @@ fetchCompletionHandler:(void (^)(UIBackgroundFetchResult))completionHandler {
 - (void)userNotificationCenter:(UNUserNotificationCenter *)center
        willPresentNotification:(UNNotification *)notification
          withCompletionHandler:(void (^)(UNNotificationPresentationOptions))completionHandler {
-    
+
     [[DKPushNotificationBridge sharedInstance] handleUserNotificationCenterWillPresent:notification
                                                                   withCompletionHandler:completionHandler];
-    
+
     // 如果桥接没有处理，执行原始逻辑
     %orig;
 }
@@ -733,10 +775,10 @@ fetchCompletionHandler:(void (^)(UIBackgroundFetchResult))completionHandler {
 - (void)userNotificationCenter:(UNUserNotificationCenter *)center
 didReceiveNotificationResponse:(UNNotificationResponse *)response
          withCompletionHandler:(void (^)(void))completionHandler {
-    
+
     [[DKPushNotificationBridge sharedInstance] handleUserNotificationCenterDidReceive:response
                                                                 withCompletionHandler:completionHandler];
-    
+
     %orig;
 }
 
@@ -752,31 +794,31 @@ didReceiveNotificationResponse:(UNNotificationResponse *)response
 
 - (NSURLSessionDataTask *)dataTaskWithRequest:(NSURLRequest *)request
                             completionHandler:(void (^)(NSData *data, NSURLResponse *response, NSError *error))completionHandler {
-    
+
     void (^wrappedHandler)(NSData *, NSURLResponse *, NSError *) = nil;
-    
+
     if (completionHandler) {
         wrappedHandler = ^(NSData *data, NSURLResponse *response, NSError *error) {
             NSData *processedData = [[DKContentFilterBypass sharedInstance] processResponseData:data];
             completionHandler(processedData, response, error);
         };
     }
-    
+
     return %orig(request, wrappedHandler ?: completionHandler);
 }
 
 - (NSURLSessionDataTask *)dataTaskWithURL:(NSURL *)url
                         completionHandler:(void (^)(NSData *data, NSURLResponse *response, NSError *error))completionHandler {
-    
+
     void (^wrappedHandler)(NSData *, NSURLResponse *, NSError *) = nil;
-    
+
     if (completionHandler) {
         wrappedHandler = ^(NSData *data, NSURLResponse *response, NSError *error) {
             NSData *processedData = [[DKContentFilterBypass sharedInstance] processResponseData:data];
             completionHandler(processedData, response, error);
         };
     }
-    
+
     return %orig(url, wrappedHandler ?: completionHandler);
 }
 
@@ -810,17 +852,17 @@ int hooked_openat(int fd, const char *path, int flags, mode_t mode);
 // ============================================================
 %ctor {
     %init;
-    
+
     @autoreleasepool {
         NSString *bundleID = DKGetCurrentBundleID();
-        
+
         NSLog(@"========================================");
         NSLog(@"[DK] DK Multi-Account Tweak v%@ 已加载", DK_VERSION);
         NSLog(@"[DK] 构建时间: %@", DK_BUILD_TIME);
         NSLog(@"[DK] 当前应用: %@", bundleID);
         NSLog(@"[DK] 功能: 多账号切换 + 登录态保持 + 推送通知桥接");
         NSLog(@"========================================");
-        
+
         // 初始化各模块
         [[DKAccountManager sharedManager] refreshAccountList];
         [[DKDataIsolation sharedInstance] setup];
@@ -831,7 +873,7 @@ int hooked_openat(int fd, const char *path, int flags, mode_t mode);
         [[DKPushNotificationBridge sharedInstance] setup];
         [[DKContentFilterBypass sharedInstance] setup];
         [[DKAccountUI sharedInstance] setup];
-        
+
         // 启动会话定期刷新
         [[DKNetworkSessionManager sharedManager] scheduleSessionRefresh];
 
@@ -847,16 +889,23 @@ int hooked_openat(int fd, const char *path, int flags, mode_t mode);
                       [manager currentAccountName]);
             }
         });
-        
+
         NSLog(@"[DK] ✅ 所有模块初始化完成，等待手势安装...");
-        
+
         // 安装 Keychain C 函数 Hook
         MSHookFunction((void *)SecItemAdd, (void *)hooked_SecItemAdd, (void **)&original_SecItemAdd);
         MSHookFunction((void *)SecItemCopyMatching, (void *)hooked_SecItemCopyMatching, (void **)&original_SecItemCopyMatching);
         MSHookFunction((void *)SecItemUpdate, (void *)hooked_SecItemUpdate, (void **)&original_SecItemUpdate);
         MSHookFunction((void *)SecItemDelete, (void *)hooked_SecItemDelete, (void **)&original_SecItemDelete);
         NSLog(@"[DK] Keychain Hook 已安装");
-        
+
+        // 安装 CFPreferences C 函数 Hook
+        // TTAccountSDK 可能通过 CFPreferences 直接读写 UserDefaults plist
+        MSHookFunction((void *)CFPreferencesSetAppValue, (void *)hooked_CFPreferencesSetAppValue, (void **)&original_CFPreferencesSetAppValue);
+        MSHookFunction((void *)CFPreferencesCopyAppValue, (void *)hooked_CFPreferencesCopyAppValue, (void **)&original_CFPreferencesCopyAppValue);
+        MSHookFunction((void *)CFPreferencesAppSynchronize, (void *)hooked_CFPreferencesAppSynchronize, (void **)&original_CFPreferencesAppSynchronize);
+        NSLog(@"[DK] CFPreferences Hook 已安装");
+
         // 安装 POSIX 文件 I/O Hook（捕获 Flutter dart:io 的底层调用）
         MSHookFunction((void *)fopen, (void *)hooked_fopen, (void **)&original_fopen);
         NSLog(@"[DK] POSIX fopen Hook 已安装");
@@ -868,12 +917,12 @@ int hooked_openat(int fd, const char *path, int flags, mode_t mode);
         NSLog(@"[DK] POSIX access Hook 已安装");
         MSHookFunction((void *)openat, (void *)hooked_openat, (void **)&original_openat);
         NSLog(@"[DK] POSIX openat Hook 已安装");
-        
+
         // 延迟启动 UI 层敏感词过滤绕过（等应用完全启动后）
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             NSLog(@"[DK] 敏感词过滤绕过 UI 层 Hook 已就绪");
         });
-        
+
         NSLog(@"[DK] 所有模块初始化完成");
     }
 }
@@ -906,7 +955,7 @@ static OSStatus hooked_SecItemCopyMatching(CFDictionaryRef query, CFTypeRef *res
     NSDictionary *nsQuery = (__bridge NSDictionary *)query;
     NSDictionary *mappedQuery = DKRemapKeychainQuery(nsQuery);
     OSStatus status = original_SecItemCopyMatching((__bridge CFDictionaryRef)mappedQuery, result);
-    
+
     if (status == errSecSuccess && result && *result) {
         if (CFGetTypeID(*result) == CFDictionaryGetTypeID()) {
             NSDictionary *item = (__bridge NSDictionary *)(*result);
@@ -939,7 +988,7 @@ static OSStatus hooked_SecItemCopyMatching(CFDictionaryRef query, CFTypeRef *res
             *result = (__bridge_retained CFTypeRef)unmappedItems;
         }
     }
-    
+
     return status;
 }
 
@@ -977,9 +1026,9 @@ FILE* hooked_fopen(const char *path, const char *mode) {
     if (_dk_fopen_hook_guard) {
         return original_fopen(path, mode);
     }
-    
+
     _dk_fopen_hook_guard = YES;
-    
+
     FILE *result = NULL;
     if (path) {
         NSString *nsPath = [NSString stringWithUTF8String:path];
@@ -993,7 +1042,7 @@ FILE* hooked_fopen(const char *path, const char *mode) {
     } else {
         result = original_fopen(path, mode);
     }
-    
+
     _dk_fopen_hook_guard = NO;
     return result;
 }
@@ -1009,9 +1058,9 @@ int hooked_open(const char *path, int flags, mode_t mode) {
     if (_dk_open_hook_guard) {
         return original_open(path, flags, mode);
     }
-    
+
     _dk_open_hook_guard = YES;
-    
+
     int result = -1;
     if (path) {
         NSString *nsPath = [NSString stringWithUTF8String:path];
@@ -1025,7 +1074,7 @@ int hooked_open(const char *path, int flags, mode_t mode) {
     } else {
         result = original_open(path, flags, mode);
     }
-    
+
     _dk_open_hook_guard = NO;
     return result;
 }
@@ -1041,9 +1090,9 @@ int hooked_stat(const char *path, struct stat *buf) {
     if (_dk_stat_hook_guard) {
         return original_stat(path, buf);
     }
-    
+
     _dk_stat_hook_guard = YES;
-    
+
     int result = -1;
     if (path) {
         NSString *nsPath = [NSString stringWithUTF8String:path];
@@ -1057,7 +1106,7 @@ int hooked_stat(const char *path, struct stat *buf) {
     } else {
         result = original_stat(path, buf);
     }
-    
+
     _dk_stat_hook_guard = NO;
     return result;
 }
@@ -1072,9 +1121,9 @@ int hooked_access(const char *path, int mode) {
     if (_dk_access_hook_guard) {
         return original_access(path, mode);
     }
-    
+
     _dk_access_hook_guard = YES;
-    
+
     int result = -1;
     if (path) {
         NSString *nsPath = [NSString stringWithUTF8String:path];
@@ -1088,7 +1137,7 @@ int hooked_access(const char *path, int mode) {
     } else {
         result = original_access(path, mode);
     }
-    
+
     _dk_access_hook_guard = NO;
     return result;
 }
@@ -1106,9 +1155,9 @@ int hooked_openat(int fd, const char *path, int flags, mode_t mode) {
     if (_dk_openat_hook_guard) {
         return original_openat(fd, path, flags, mode);
     }
-    
+
     _dk_openat_hook_guard = YES;
-    
+
     int result = -1;
     if (path) {
         NSString *nsPath = [NSString stringWithUTF8String:path];
@@ -1122,7 +1171,59 @@ int hooked_openat(int fd, const char *path, int flags, mode_t mode) {
     } else {
         result = original_openat(fd, path, flags, mode);
     }
-    
+
     _dk_openat_hook_guard = NO;
     return result;
+}
+
+// ============================================================
+// CFPreferences C 函数 Hook 实现
+// TTAccountSDK 是 C/C++ 重 SDK，可能通过 CFPreferences
+// 直接读写 UserDefaults plist 文件，绕过 NSUserDefaults Hook。
+// 这里对非默认账号做独立 plist 隔离，默认账号走原始逻辑。
+// ============================================================
+
+static void hooked_CFPreferencesSetAppValue(CFStringRef key, CFPropertyListRef value, CFStringRef applicationID) {
+    NSMutableDictionary *dict = DKCFPreferencesLoad();
+    if (dict) {
+        // 非默认账号：写入独立 plist
+        NSString *nsKey = (__bridge NSString *)key;
+        if (value) {
+            dict[nsKey] = (__bridge id)value;
+        } else {
+            [dict removeObjectForKey:nsKey];
+        }
+        DKCFPreferencesSave(dict);
+        // 同步写入 NSUserDefaults 隔离 plist，保持一致性
+        DKAccountManager *manager = [DKAccountManager sharedManager];
+        [[manager sharedUserDefaults] setObject:(__bridge id)value forKey:nsKey];
+    } else {
+        // 默认账号：走原始逻辑
+        original_CFPreferencesSetAppValue(key, value, applicationID);
+    }
+}
+
+static CFPropertyListRef hooked_CFPreferencesCopyAppValue(CFStringRef key, CFStringRef applicationID) {
+    NSMutableDictionary *dict = DKCFPreferencesLoad();
+    if (dict) {
+        // 非默认账号：从独立 plist 读取
+        NSString *nsKey = (__bridge NSString *)key;
+        id value = dict[nsKey];
+        if (value) {
+            CFRetain((__bridge CFTypeRef)value);
+            return (__bridge CFPropertyListRef)value;
+        }
+        return NULL;
+    }
+    // 默认账号：走原始逻辑
+    return original_CFPreferencesCopyAppValue(key, applicationID);
+}
+
+static Boolean hooked_CFPreferencesAppSynchronize(CFStringRef applicationID) {
+    NSMutableDictionary *dict = DKCFPreferencesLoad();
+    if (dict) {
+        // 非默认账号：plist 已在写入时同步，这里直接返回 true
+        return true;
+    }
+    return original_CFPreferencesAppSynchronize(applicationID);
 }
