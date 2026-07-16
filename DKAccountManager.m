@@ -303,6 +303,13 @@ static NSString *_accountsRootPath = nil;
     // 如果当前是 B 账号，会错误读取/写入默认账号的登录态。
     [[DKNetworkSessionManager sharedManager] saveCurrentSession];
 
+    if (switchingFromDefaultToSubAccount) {
+        // 延迟安装 Hook 后，App 重启最早期会直接读取原始 Keychain。
+        // 如果不在退出前清空默认账号 Keychain，子账号启动仍会读到默认账号登录态。
+        // 默认账号 Keychain 已在上面备份，切回默认账号时会恢复。
+        [[DKNetworkSessionManager sharedManager] clearDefaultAccountKeychainForSubAccountStartup];
+    }
+
     // 保存完旧账号后，暂停自动备份一段时间。
     // 账号变量马上会切到目标账号，但应用内存里仍可能显示旧账号页面；
     // 如果退出前 Cookie/生命周期回调触发 saveCurrentSession，

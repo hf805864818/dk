@@ -2,6 +2,7 @@
 #import "DKAccountManager.h"
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
+#import <Security/Security.h>
 
 // ============================================================
 // DKNetworkSessionManager
@@ -554,6 +555,91 @@ static BOOL DKIsSessionRelatedDefaultsKey(NSString *key) {
     NSLog(@"[DK] 默认账号 Keychain 已备份 %lu 项", (unsigned long)allItems.count);
 }
 
+- (void)clearDefaultAccountKeychainForSubAccountStartup {
+    NSLog(@"[DK] 清空默认账号 Keychain，避免子账号启动时读取默认登录态...");
+
+    NSArray *keychainClasses = @[
+        (__bridge id)kSecClassGenericPassword,
+        (__bridge id)kSecClassInternetPassword,
+        (__bridge id)kSecClassKey,
+    ];
+
+    NSInteger deleted = 0;
+
+    for (id secClass in keychainClasses) {
+        NSDictionary *query = @{
+            (__bridge id)kSecClass: secClass,
+            (__bridge id)kSecMatchLimit: (__bridge id)kSecMatchLimitAll,
+            (__bridge id)kSecReturnAttributes: @YES,
+        };
+
+        CFTypeRef result = NULL;
+        OSStatus status = SecItemCopyMatching((__bridge CFDictionaryRef)query, &result);
+        if (status != errSecSuccess || !result) {
+            if (result) CFRelease(result);
+            continue;
+        }
+
+        NSArray *items = nil;
+        if (CFGetTypeID(result) == CFArrayGetTypeID()) {
+            items = (__bridge NSArray *)result;
+        } else if (CFGetTypeID(result) == CFDictionaryGetTypeID()) {
+            items = @[(__bridge NSDictionary *)result];
+        }
+
+        for (NSDictionary *item in items) {
+            if (![item isKindOfClass:[NSDictionary class]]) continue;
+
+            NSString *service = item[(__bridge id)kSecAttrService];
+            NSString *account = item[(__bridge id)kSecAttrAccount];
+            NSString *label = item[(__bridge id)kSecAttrLabel];
+            id generic = item[(__bridge id)kSecAttrGeneric];
+
+            // 只清理原始默认账号项，保留所有 DK_ 子账号项。
+            BOOL isSubAccountItem = NO;
+            NSArray *stringFields = @[service ?: @"", account ?: @"", label ?: @""];
+            for (NSString *field in stringFields) {
+                if ([field isKindOfClass:[NSString class]] && [field hasPrefix:@"DK_"]) {
+                    isSubAccountItem = YES;
+                    break;
+                }
+            }
+            if (!isSubAccountItem && [generic isKindOfClass:[NSData class]]) {
+                NSString *genericString = [[NSString alloc] initWithData:generic encoding:NSUTF8StringEncoding];
+                if ([genericString hasPrefix:@"DK_"]) {
+                    isSubAccountItem = YES;
+                }
+            } else if (!isSubAccountItem && [generic isKindOfClass:[NSString class]]) {
+                if ([(NSString *)generic hasPrefix:@"DK_"]) {
+                    isSubAccountItem = YES;
+                }
+            }
+            if (isSubAccountItem) continue;
+
+            NSMutableDictionary *deleteQuery = [NSMutableDictionary dictionary];
+            deleteQuery[(__bridge id)kSecClass] = secClass;
+            if (service) deleteQuery[(__bridge id)kSecAttrService] = service;
+            if (account) deleteQuery[(__bridge id)kSecAttrAccount] = account;
+            if (label) deleteQuery[(__bridge id)kSecAttrLabel] = label;
+            if (generic) deleteQuery[(__bridge id)kSecAttrGeneric] = generic;
+            if (item[(__bridge id)kSecAttrAccessGroup]) {
+                deleteQuery[(__bridge id)kSecAttrAccessGroup] = item[(__bridge id)kSecAttrAccessGroup];
+            }
+
+            if (deleteQuery.count > 1) {
+                OSStatus deleteStatus = SecItemDelete((__bridge CFDictionaryRef)deleteQuery);
+                if (deleteStatus == errSecSuccess) {
+                    deleted++;
+                }
+            }
+        }
+
+        CFRelease(result);
+    }
+
+    NSLog(@"[DK] 默认账号 Keychain 已临时清理 %ld 项", (long)deleted);
+}
+
 - (void)restoreDefaultAccountKeychain {
     NSLog(@"[DK] 恢复默认账号 Keychain 数据...");
 
@@ -566,9 +652,17 @@ static BOOL DKIsSessionRelatedDefaultsKey(NSString *key) {
     }
 
     NSError *error = nil;
-    NSArray *items = [NSKeyedUnarchiver unarchivedObjectOfClass:[NSArray class]
-                                                       fromData:archivedData
-                                                          error:&error];
+    NSSet *allowedClasses = [NSSet setWithObjects:
+                             [NSArray class],
+                             [NSDictionary class],
+                             [NSMutableDictionary class],
+                             [NSString class],
+                             [NSData class],
+                             [NSNumber class],
+                             nil];
+    NSArray *items = [NSKeyedUnarchiver unarchivedObjectOfClasses:allowedClasses
+                                                         fromData:archivedData
+                                                            error:&error];
     if (!items || error) {
         NSLog(@"[DK] 默认账号 Keychain 备份解档失败: %@", error);
         return;

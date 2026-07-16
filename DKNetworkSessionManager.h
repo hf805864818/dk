@@ -49,4 +49,7 @@
 /// 恢复默认账号 Keychain 数据（切回默认账号时）
 - (void)restoreDefaultAccountKeychain;
 
+/// 临时清空默认账号 Keychain 数据（切到子账号并重启前调用）
+- (void)clearDefaultAccountKeychainForSubAccountStartup;
+
 @end
