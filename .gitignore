@@ -1,0 +1,24 @@
+# Theos build artifacts
+.theos/
+packages/
+output/
+*.deb
+*.dylib
+
+# Xcode
+*.xcworkspace
+*.xcuserdata
+DerivedData/
+
+# macOS
+.DS_Store
+*.swp
+*.swo
+
+# IDE
+.idea/
+.vscode/
+
+# Temp
+*.tmp
+*.log

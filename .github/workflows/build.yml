@@ -1,0 +1,239 @@
+name: DK Tweak CI/CD - Auto Build & Release
+
+# 触发条件：push 到 main 分支
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      version_bump:
+        description: '版本递增类型'
+        required: true
+        default: 'patch'
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+
+# 权限设置
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  build:
+    name: Build DK Tweak
+    runs-on: macos-14
+
+    steps:
+      # 1. 检出代码
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      # 2. 读取当前版本号
+      - name: Read Current Version
+        id: version
+        run: |
+          if [ -f VERSION ]; then
+            VERSION=$(cat VERSION)
+          else
+            VERSION="1.0.0"
+          fi
+          echo "current_version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Current Version: $VERSION"
+
+      # 3. 自动递增版本号
+      - name: Bump Version
+        id: bump
+        run: |
+          CURRENT="${{ steps.version.outputs.current_version }}"
+          BUMP_TYPE="${{ github.event.inputs.version_bump || 'patch' }}"
+
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
+
+          case "$BUMP_TYPE" in
+            major)
+              MAJOR=$((MAJOR + 1))
+              MINOR=0
+              PATCH=0
+              ;;
+            minor)
+              MINOR=$((MINOR + 1))
+              PATCH=0
+              ;;
+            patch|*)
+              PATCH=$((PATCH + 1))
+              ;;
+          esac
+
+          NEW_VERSION="${MAJOR}.${MINOR}.${PATCH}"
+          echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
+          echo "New Version: $NEW_VERSION"
+
+          # 更新 VERSION 文件
+          echo "$NEW_VERSION" > VERSION
+
+          # 更新 control 文件中的版本号
+          sed -i '' "s/Version: .*/Version: $NEW_VERSION/" control
+
+          # 更新 Makefile 中的版本号（如果有版本变量）
+          # 更新 Tweak.x 中的版本号日志
+          sed -i '' "s/DK Multi-Account Tweak v[0-9.]*/DK Multi-Account Tweak v$NEW_VERSION/" Tweak.x
+
+      # 4. 设置 Theos 环境
+      - name: Setup Theos
+        run: |
+          # 安装 Theos
+          export THEOS=/opt/theos
+          if [ ! -d "$THEOS" ]; then
+            echo "Cloning Theos..."
+            git clone --recursive https://github.com/theos/theos.git $THEOS
+          else
+            echo "Theos already exists, updating..."
+            cd $THEOS && git pull
+          fi
+
+          # 检查 SDK
+          echo "Available SDKs:"
+          ls -la $THEOS/sdks/ 2>/dev/null || echo "No SDKs found"
+
+          # 如果没有 SDK，从 Xcode 复制
+          if [ ! "$(ls -A $THEOS/sdks/ 2>/dev/null)" ]; then
+            echo "Copying SDK from Xcode..."
+            XCODE_SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+            if [ -d "$XCODE_SDK" ]; then
+              SDK_VERSION=$(xcrun --sdk iphoneos --show-sdk-version)
+              mkdir -p $THEOS/sdks
+              ln -s "$XCODE_SDK" "$THEOS/sdks/iPhoneOS${SDK_VERSION}.sdk" 2>/dev/null || true
+            fi
+          fi
+
+      # 5. 编译 Tweak
+      - name: Build Tweak
+        run: |
+          export THEOS=/opt/theos
+          export PATH="$THEOS/bin:$PATH"
+
+          echo "Starting build..."
+          make clean 2>/dev/null || true
+          make package
+
+          echo "Build artifacts:"
+          ls -la packages/ 2>/dev/null || echo "No packages directory"
+          ls -la output/ 2>/dev/null || echo "No output directory"
+          ls -la .theos/obj/ 2>/dev/null | grep dylib || echo "No dylib found"
+
+      # 6. 收集构建产物
+      - name: Collect Artifacts
+        run: |
+          mkdir -p release_artifacts
+
+          # 复制 .deb 文件
+          if [ -d "packages" ]; then
+            cp packages/*.deb release_artifacts/ 2>/dev/null || true
+          fi
+
+          # 复制 .dylib 文件
+          if [ -f "output/dk.dylib" ]; then
+            cp output/dk.dylib release_artifacts/
+          elif [ -f ".theos/obj/dk.dylib" ]; then
+            cp .theos/obj/dk.dylib release_artifacts/
+          else
+            # 搜索 dylib
+            find . -name "dk.dylib" -type f -exec cp {} release_artifacts/ \;
+          fi
+
+          echo "Release artifacts:"
+          ls -la release_artifacts/
+
+      # 7. 生成更新日志
+      - name: Generate Changelog
+        id: changelog
+        run: |
+          NEW_VERSION="${{ steps.bump.outputs.new_version }}"
+          TODAY=$(date +%Y-%m-%d)
+
+          # 获取最近的 commit 消息作为变更记录
+          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          if [ -z "$LAST_TAG" ]; then
+            COMMITS=$(git log --oneline --no-merges -10)
+          else
+            COMMITS=$(git log ${LAST_TAG}..HEAD --oneline --no-merges)
+          fi
+
+          # 生成 changelog 条目
+          CHANGELOG_ENTRY="## [${NEW_VERSION}] - ${TODAY}\n\n"
+          if [ -z "$COMMITS" ]; then
+            CHANGELOG_ENTRY+="- 自动构建版本更新\n"
+          else
+            while IFS= read -r line; do
+              if [ -n "$line" ]; then
+                CHANGELOG_ENTRY+="- ${line}\n"
+              fi
+            done <<< "$COMMITS"
+          fi
+
+          # 写入 CHANGELOG.md
+          if [ -f CHANGELOG.md ]; then
+            HEADER=$(head -1 CHANGELOG.md)
+            CONTENT=$(tail -n +2 CHANGELOG.md)
+            echo -e "$HEADER\n\n$CHANGELOG_ENTRY\n$CONTENT" > CHANGELOG.md
+          fi
+
+          echo "changelog_entry<<EOF" >> $GITHUB_OUTPUT
+          echo -e "$CHANGELOG_ENTRY" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      # 8. 提交版本号更新
+      - name: Commit Version Bump
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add VERSION control CHANGELOG.md Tweak.x
+          git commit -m "chore: bump version to ${{ steps.bump.outputs.new_version }}" || echo "No changes to commit"
+          git tag "v${{ steps.bump.outputs.new_version }}"
+
+      # 9. 推送版本更新到仓库
+      - name: Push Changes
+        run: |
+          git push origin main --tags
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # 10. 创建 GitHub Release
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.bump.outputs.new_version }}
+          name: DK v${{ steps.bump.outputs.new_version }}
+          body: |
+            ## DK Multi-Account Tweak v${{ steps.bump.outputs.new_version }}
+
+            ${{ steps.changelog.outputs.changelog_entry }}
+
+            ### 构建产物
+            - `dk.deb` - Cydia/Sileo 安装包
+            - `dk.dylib` - 动态链接库（手动注入用）
+
+            ### 安装方式
+            1. **推荐**: 使用包管理器安装 .deb 文件
+            2. **手动**: 将 dk.dylib 注入到 TRAE.app 中
+          files: release_artifacts/*
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # 11. 上传构建产物为 Artifact
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dk-tweak-v${{ steps.bump.outputs.new_version }}
+          path: release_artifacts/
+          retention-days: 30
