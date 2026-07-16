@@ -22,6 +22,9 @@
 /// 切换悬浮按钮显示/隐藏状态
 - (void)toggleFloatingButton;
 
+/// 摇晃触发显示悬浮按钮（由 sendEvent: Hook 调用）
+- (void)triggerShowFloatingButton;
+
 /// 悬浮按钮是否可见
 @property (nonatomic, assign, readonly) BOOL isFloatingButtonVisible;
 
