@@ -45,7 +45,12 @@ static NSString* DKMapPath(NSString *originalPath) {
 // ============================================================
 
 // 用于 %hook 的辅助函数：将 NSFileManager 方法调用路径映射
+
+// 声明外部启动保护函数（定义在 Tweak.x 中）
+extern BOOL DKIsStartupGuardActive(void);
+
 NSString* DKRemapFilePath(NSString *path) {
+    if (DKIsStartupGuardActive()) return path;
     DKAccountManager *manager = [DKAccountManager sharedManager];
     if (manager.isSwitching) return path;
     if ([[manager currentAccountName] isEqualToString:[manager defaultAccountName]]) return path;

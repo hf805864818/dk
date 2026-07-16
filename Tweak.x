@@ -429,7 +429,16 @@ static void DKCFPreferencesSave(NSMutableDictionary *dict) {
 // 实现真正的配置隔离。新账号创建时会自动复制原始默认值。
 // ============================================================
 
+// 启动保护：%ctor 期间 App 的 dispatch_once 初始化可能被 DK 的 setup 调用
+// 间接触发，此时 DK 自身尚未完全就绪。强制所有 Hook 透传，避免返回 nil 导致 App 崩溃。
+static BOOL _dkStartupGuard = YES;
+
+BOOL DKIsStartupGuardActive(void) {
+    return _dkStartupGuard;
+}
+
 static BOOL DKShouldUseOriginalDefaults(void) {
+    if (_dkStartupGuard) return YES;
     DKAccountManager *manager = [DKAccountManager sharedManager];
     if (manager.isSwitching) return YES;
 
@@ -711,6 +720,8 @@ fetchCompletionHandler:(void (^)(UIBackgroundFetchResult))completionHandler {
 + (NSURLSessionConfiguration *)defaultSessionConfiguration {
     NSURLSessionConfiguration *config = %orig;
 
+    if (_dkStartupGuard) return config;
+
     DKAccountManager *manager = [DKAccountManager sharedManager];
     NSString *currentAccount = [manager currentAccountName];
 
@@ -731,6 +742,8 @@ fetchCompletionHandler:(void (^)(UIBackgroundFetchResult))completionHandler {
 
 + (NSURLSessionConfiguration *)ephemeralSessionConfiguration {
     NSURLSessionConfiguration *config = %orig;
+
+    if (_dkStartupGuard) return config;
 
     DKAccountManager *manager = [DKAccountManager sharedManager];
     NSString *currentAccount = [manager currentAccountName];
@@ -849,81 +862,96 @@ int hooked_openat(int fd, const char *path, int flags, mode_t mode);
 
 // ============================================================
 // 构造函数 - 插件加载时调用
+//
+// 关键设计：不在此处调用 %init，也不安装任何 Hook。
+// %init 会调用 MSHookMessageEx 修改 NSDictionary/NSData/NSArray
+// 等底层系统类的方法表。即使 Hook 透传，修改方法表本身也可能
+// 扰乱 TRAE 主程序的 dispatch_once 初始化块，导致
+// "attempt to insert nil object from objects[15]" 崩溃。
+//
+// 解决方案：延迟 2 秒到 App 完全启动后再安装所有 Hook。
+// 此时 TRAE 的 dispatch_once 初始化已全部完成，Hook 不会
+// 干扰任何关键启动流程。
 // ============================================================
 %ctor {
-    %init;
-
     @autoreleasepool {
         NSString *bundleID = DKGetCurrentBundleID();
 
         NSLog(@"========================================");
-        NSLog(@"[DK] DK Multi-Account Tweak v%@ 已加载", DK_VERSION);
+        NSLog(@"[DK] DK Multi-Account Tweak v1.0.25%@ 已加载", DK_VERSION);
         NSLog(@"[DK] 构建时间: %@", DK_BUILD_TIME);
         NSLog(@"[DK] 当前应用: %@", bundleID);
-        NSLog(@"[DK] 功能: 多账号切换 + 登录态保持 + 推送通知桥接");
+        NSLog(@"[DK] 延迟安装模式：2 秒后将安装所有 Hook...");
         NSLog(@"========================================");
 
-        // 初始化各模块
-        [[DKAccountManager sharedManager] refreshAccountList];
-        [[DKDataIsolation sharedInstance] setup];
-        [[DKFileManagerHook sharedInstance] install];
-        [[DKUserDefaultsHook sharedInstance] install];
-        [[DKKeychainHook sharedInstance] install];
-        [[DKNetworkSessionManager sharedManager] setup];
-        [[DKPushNotificationBridge sharedInstance] setup];
-        [[DKContentFilterBypass sharedInstance] setup];
-        [[DKAccountUI sharedInstance] setup];
-
-        // 启动会话定期刷新
-        [[DKNetworkSessionManager sharedManager] scheduleSessionRefresh];
-
-        // 启动时如果当前是默认账号，延迟保存一份默认账号快照。
-        // 这样升级插件或首次使用时，即使还没添加 B 账号，也能先把默认登录态留住。
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            DKAccountManager *manager = [DKAccountManager sharedManager];
-            DKNetworkSessionManager *sessionManager = [DKNetworkSessionManager sharedManager];
-            if ([[manager currentAccountName] isEqualToString:[manager defaultAccountName]]) {
-                [sessionManager snapshotDefaultSessionIfActive];
-            } else if (![sessionManager hasSessionSnapshotForAccount:[manager defaultAccountName]]) {
-                NSLog(@"[DK] 当前为子账号 %@，默认账号暂无快照；切回默认并登录后会自动保存",
-                      [manager currentAccountName]);
-            }
-        });
-
-        NSLog(@"[DK] ✅ 所有模块初始化完成，等待手势安装...");
-
-        // 安装 Keychain C 函数 Hook
-        MSHookFunction((void *)SecItemAdd, (void *)hooked_SecItemAdd, (void **)&original_SecItemAdd);
-        MSHookFunction((void *)SecItemCopyMatching, (void *)hooked_SecItemCopyMatching, (void **)&original_SecItemCopyMatching);
-        MSHookFunction((void *)SecItemUpdate, (void *)hooked_SecItemUpdate, (void **)&original_SecItemUpdate);
-        MSHookFunction((void *)SecItemDelete, (void *)hooked_SecItemDelete, (void **)&original_SecItemDelete);
-        NSLog(@"[DK] Keychain Hook 已安装");
-
-        // 安装 CFPreferences C 函数 Hook
-        // TTAccountSDK 可能通过 CFPreferences 直接读写 UserDefaults plist
-        MSHookFunction((void *)CFPreferencesSetAppValue, (void *)hooked_CFPreferencesSetAppValue, (void **)&original_CFPreferencesSetAppValue);
-        MSHookFunction((void *)CFPreferencesCopyAppValue, (void *)hooked_CFPreferencesCopyAppValue, (void **)&original_CFPreferencesCopyAppValue);
-        MSHookFunction((void *)CFPreferencesAppSynchronize, (void *)hooked_CFPreferencesAppSynchronize, (void **)&original_CFPreferencesAppSynchronize);
-        NSLog(@"[DK] CFPreferences Hook 已安装");
-
-        // 安装 POSIX 文件 I/O Hook（捕获 Flutter dart:io 的底层调用）
-        MSHookFunction((void *)fopen, (void *)hooked_fopen, (void **)&original_fopen);
-        NSLog(@"[DK] POSIX fopen Hook 已安装");
-        MSHookFunction((void *)open, (void *)hooked_open, (void **)&original_open);
-        NSLog(@"[DK] POSIX open Hook 已安装");
-        MSHookFunction((void *)stat, (void *)hooked_stat, (void **)&original_stat);
-        NSLog(@"[DK] POSIX stat Hook 已安装");
-        MSHookFunction((void *)access, (void *)hooked_access, (void **)&original_access);
-        NSLog(@"[DK] POSIX access Hook 已安装");
-        MSHookFunction((void *)openat, (void *)hooked_openat, (void **)&original_openat);
-        NSLog(@"[DK] POSIX openat Hook 已安装");
-
-        // 延迟启动 UI 层敏感词过滤绕过（等应用完全启动后）
+        // 延迟到 App 完全启动后安装所有 Hook 和初始化模块
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            NSLog(@"[DK] 敏感词过滤绕过 UI 层 Hook 已就绪");
-        });
+            static dispatch_once_t onceToken;
+            dispatch_once(&onceToken, ^{
+                // ============================================
+                // 第一步：安装 Logos %hook（MSHookMessageEx）
+                // ============================================
+                %init;
+                NSLog(@"[DK] Logos Hook 已安装");
 
-        NSLog(@"[DK] 所有模块初始化完成");
+                // ============================================
+                // 第二步：初始化各模块
+                // ============================================
+                [[DKAccountManager sharedManager] refreshAccountList];
+                [[DKDataIsolation sharedInstance] setup];
+                [[DKFileManagerHook sharedInstance] install];
+                [[DKUserDefaultsHook sharedInstance] install];
+                [[DKKeychainHook sharedInstance] install];
+                [[DKNetworkSessionManager sharedManager] setup];
+                [[DKPushNotificationBridge sharedInstance] setup];
+                [[DKContentFilterBypass sharedInstance] setup];
+                [[DKAccountUI sharedInstance] setup];
+
+                // 启动会话定期刷新
+                [[DKNetworkSessionManager sharedManager] scheduleSessionRefresh];
+
+                // 默认账号快照
+                DKAccountManager *manager = [DKAccountManager sharedManager];
+                DKNetworkSessionManager *sessionManager = [DKNetworkSessionManager sharedManager];
+                if ([[manager currentAccountName] isEqualToString:[manager defaultAccountName]]) {
+                    [sessionManager snapshotDefaultSessionIfActive];
+                } else if (![sessionManager hasSessionSnapshotForAccount:[manager defaultAccountName]]) {
+                    NSLog(@"[DK] 当前为子账号 %@，默认账号暂无快照；切回默认并登录后会自动保存",
+                          [manager currentAccountName]);
+                }
+
+                // ============================================
+                // 第三步：安装 C 函数 Hook（MSHookFunction）
+                // ============================================
+                // Keychain
+                MSHookFunction((void *)SecItemAdd, (void *)hooked_SecItemAdd, (void **)&original_SecItemAdd);
+                MSHookFunction((void *)SecItemCopyMatching, (void *)hooked_SecItemCopyMatching, (void **)&original_SecItemCopyMatching);
+                MSHookFunction((void *)SecItemUpdate, (void *)hooked_SecItemUpdate, (void **)&original_SecItemUpdate);
+                MSHookFunction((void *)SecItemDelete, (void *)hooked_SecItemDelete, (void **)&original_SecItemDelete);
+                NSLog(@"[DK] Keychain Hook 已安装");
+
+                // CFPreferences
+                MSHookFunction((void *)CFPreferencesSetAppValue, (void *)hooked_CFPreferencesSetAppValue, (void **)&original_CFPreferencesSetAppValue);
+                MSHookFunction((void *)CFPreferencesCopyAppValue, (void *)hooked_CFPreferencesCopyAppValue, (void **)&original_CFPreferencesCopyAppValue);
+                MSHookFunction((void *)CFPreferencesAppSynchronize, (void *)hooked_CFPreferencesAppSynchronize, (void **)&original_CFPreferencesAppSynchronize);
+                NSLog(@"[DK] CFPreferences Hook 已安装");
+
+                // POSIX 文件 I/O
+                MSHookFunction((void *)fopen, (void *)hooked_fopen, (void **)&original_fopen);
+                MSHookFunction((void *)open, (void *)hooked_open, (void **)&original_open);
+                MSHookFunction((void *)stat, (void *)hooked_stat, (void **)&original_stat);
+                MSHookFunction((void *)access, (void *)hooked_access, (void **)&original_access);
+                MSHookFunction((void *)openat, (void *)hooked_openat, (void **)&original_openat);
+                NSLog(@"[DK] POSIX Hook 已安装");
+
+                // ============================================
+                // 第四步：解除启动保护，激活账号隔离
+                // ============================================
+                _dkStartupGuard = NO;
+                NSLog(@"[DK] ✅ 启动保护期结束，账号隔离已激活");
+                NSLog(@"[DK] 所有模块初始化完成");
+            });
+        });
     }
 }
 
@@ -946,12 +974,14 @@ int hooked_openat(int fd, const char *path, int flags, mode_t mode);
 // ============================================================
 
 static OSStatus hooked_SecItemAdd(CFDictionaryRef query, CFTypeRef *result) {
+    if (_dkStartupGuard) return original_SecItemAdd(query, result);
     NSDictionary *nsQuery = (__bridge NSDictionary *)query;
     NSDictionary *mappedQuery = DKRemapKeychainQuery(nsQuery);
     return original_SecItemAdd((__bridge CFDictionaryRef)mappedQuery, result);
 }
 
 static OSStatus hooked_SecItemCopyMatching(CFDictionaryRef query, CFTypeRef *result) {
+    if (_dkStartupGuard) return original_SecItemCopyMatching(query, result);
     NSDictionary *nsQuery = (__bridge NSDictionary *)query;
     NSDictionary *mappedQuery = DKRemapKeychainQuery(nsQuery);
     OSStatus status = original_SecItemCopyMatching((__bridge CFDictionaryRef)mappedQuery, result);
@@ -993,6 +1023,7 @@ static OSStatus hooked_SecItemCopyMatching(CFDictionaryRef query, CFTypeRef *res
 }
 
 static OSStatus hooked_SecItemUpdate(CFDictionaryRef query, CFDictionaryRef attributesToUpdate) {
+    if (_dkStartupGuard) return original_SecItemUpdate(query, attributesToUpdate);
     NSDictionary *nsQuery = (__bridge NSDictionary *)query;
     NSDictionary *mappedQuery = DKRemapKeychainQuery(nsQuery);
     NSDictionary *nsAttributes = (__bridge NSDictionary *)attributesToUpdate;
@@ -1002,6 +1033,7 @@ static OSStatus hooked_SecItemUpdate(CFDictionaryRef query, CFDictionaryRef attr
 }
 
 static OSStatus hooked_SecItemDelete(CFDictionaryRef query) {
+    if (_dkStartupGuard) return original_SecItemDelete(query);
     NSDictionary *nsQuery = (__bridge NSDictionary *)query;
     DKAccountManager *manager = [DKAccountManager sharedManager];
     NSString *currentAccount = [manager currentAccountName];
@@ -1067,6 +1099,7 @@ static OSStatus hooked_SecItemDelete(CFDictionaryRef query) {
 // ============================================================
 
 FILE* hooked_fopen(const char *path, const char *mode) {
+    if (_dkStartupGuard) return original_fopen(path, mode);
     // 递归保护：如果已经在 hooked_fopen 中，直接走原始实现
     if (_dk_fopen_hook_guard) {
         return original_fopen(path, mode);
@@ -1099,6 +1132,7 @@ FILE* hooked_fopen(const char *path, const char *mode) {
 // ============================================================
 
 int hooked_open(const char *path, int flags, mode_t mode) {
+    if (_dkStartupGuard) return original_open(path, flags, mode);
     // 递归保护
     if (_dk_open_hook_guard) {
         return original_open(path, flags, mode);
@@ -1131,6 +1165,7 @@ int hooked_open(const char *path, int flags, mode_t mode) {
 // ============================================================
 
 int hooked_stat(const char *path, struct stat *buf) {
+    if (_dkStartupGuard) return original_stat(path, buf);
     // 递归保护
     if (_dk_stat_hook_guard) {
         return original_stat(path, buf);
@@ -1162,6 +1197,7 @@ int hooked_stat(const char *path, struct stat *buf) {
 // ============================================================
 
 int hooked_access(const char *path, int mode) {
+    if (_dkStartupGuard) return original_access(path, mode);
     // 递归保护
     if (_dk_access_hook_guard) {
         return original_access(path, mode);
@@ -1196,6 +1232,7 @@ int hooked_access(const char *path, int mode) {
 // ============================================================
 
 int hooked_openat(int fd, const char *path, int flags, mode_t mode) {
+    if (_dkStartupGuard) return original_openat(fd, path, flags, mode);
     // 递归保护
     if (_dk_openat_hook_guard) {
         return original_openat(fd, path, flags, mode);
@@ -1229,6 +1266,10 @@ int hooked_openat(int fd, const char *path, int flags, mode_t mode) {
 // ============================================================
 
 static void hooked_CFPreferencesSetAppValue(CFStringRef key, CFPropertyListRef value, CFStringRef applicationID) {
+    if (_dkStartupGuard) {
+        original_CFPreferencesSetAppValue(key, value, applicationID);
+        return;
+    }
     NSMutableDictionary *dict = DKCFPreferencesLoad();
     if (dict) {
         // 非默认账号：写入独立 plist
@@ -1246,6 +1287,7 @@ static void hooked_CFPreferencesSetAppValue(CFStringRef key, CFPropertyListRef v
 }
 
 static CFPropertyListRef hooked_CFPreferencesCopyAppValue(CFStringRef key, CFStringRef applicationID) {
+    if (_dkStartupGuard) return original_CFPreferencesCopyAppValue(key, applicationID);
     NSMutableDictionary *dict = DKCFPreferencesLoad();
     if (dict) {
         // 非默认账号：从独立 plist 读取
@@ -1262,6 +1304,7 @@ static CFPropertyListRef hooked_CFPreferencesCopyAppValue(CFStringRef key, CFStr
 }
 
 static Boolean hooked_CFPreferencesAppSynchronize(CFStringRef applicationID) {
+    if (_dkStartupGuard) return original_CFPreferencesAppSynchronize(applicationID);
     NSMutableDictionary *dict = DKCFPreferencesLoad();
     if (dict) {
         // 非默认账号：plist 已在写入时同步，这里直接返回 true
