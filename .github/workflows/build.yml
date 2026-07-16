@@ -151,6 +151,9 @@ jobs:
           export THEOS="${{ github.workspace }}/theos"
           export PATH="$THEOS/bin:$PATH"
 
+          # 彻底清理所有中间文件
+          rm -rf .theos/obj
+          rm -rf packages
           make clean 2>/dev/null || true
           make package FINALPACKAGE=1
 
