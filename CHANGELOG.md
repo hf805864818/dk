@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.0.35] - 2026-07-16
+
+- 17748ab fix: 用 fishhook 替换 MSHookFunction，修复 iOS 17 W^X 保护导致闪退
+
+
 ## [1.0.34] - 2026-07-16
 
 - 8370a17 fix: 移除 dk.plist 中错误的 com.apple.AppStore 过滤 + 增强诊断日志
