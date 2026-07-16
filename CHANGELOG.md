@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.0.19] - 2026-07-16
+
+- 8068a3e fix: do not clear default account auth keys on restore
+
+
 ## [1.0.18] - 2026-07-16
 
 - 38b665e feat: add multi-account data cleanup
