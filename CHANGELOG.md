@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.10] - 2026-07-16
+
+- 06aa633 fix: 将POSIX Hook函数声明移到%ctor之前解决编译错误
+- d0de597 fix: 移除创建账号时复制NSUserDefaults + 添加POSIX open/stat/access Hook
+- db711e4 fix: 新增 NSURL/NSFileHandle/NSKeyedArchiver 文件 Hook + POSIX fopen Hook
+
+
 ## [1.0.9] - 2026-07-16
 
 - 27e01c4 fix: 添加 NSData/NSDictionary/NSArray 等文件操作 Hook
