@@ -152,6 +152,19 @@ static NSString *_accountsRootPath = nil;
                             error:nil];
     }
     
+    // 复制原始 NSUserDefaults 到账号的独立 plist（让新账号有基础数据）
+    NSString *accountPlistPath = [accountPath stringByAppendingPathComponent:@"Library/Preferences/dk_defaults.plist"];
+    NSDictionary *originalDefaults = [[NSUserDefaults standardUserDefaults] dictionaryRepresentation];
+    // 排除 DK 内部键
+    NSMutableDictionary *filteredDefaults = [NSMutableDictionary dictionary];
+    for (NSString *key in originalDefaults) {
+        if (![key hasPrefix:@"DK_"]) {
+            filteredDefaults[key] = originalDefaults[key];
+        }
+    }
+    [filteredDefaults writeToFile:accountPlistPath atomically:YES];
+    NSLog(@"[DK] 已复制 %lu 个 NSUserDefaults 键值到账号 %@", (unsigned long)filteredDefaults.count, name);
+    
     // 保存元数据
     NSDictionary *metadata = @{
         @"name": name,
@@ -267,9 +280,12 @@ static NSString *_accountsRootPath = nil;
         
         if (rootVC) {
             UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"账号已切换"
-                                                                           message:[NSString stringWithFormat:@"已切换到账号「%@」\n请重启 TRAE 以使新账号生效", name]
+                                                                           message:[NSString stringWithFormat:@"已切换到账号「%@」\n应用即将重启以使新账号生效", name]
                                                                     preferredStyle:UIAlertControllerStyleAlert];
-            [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
+            [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+                // 退出应用，让用户重新打开后以新账号运行
+                exit(0);
+            }]];
             [rootVC presentViewController:alert animated:YES completion:nil];
         }
     });

@@ -195,6 +195,9 @@ static OSStatus hooked_SecItemDelete(CFDictionaryRef query);
 // 每个账号使用独立的 plist 文件存储配置
 // 注意：直接读写 plist 文件，不使用 NSUserDefaults 实例方法，
 // 避免触发 Hook 导致无限递归
+//
+// 重要：对非默认账号，不通过 %orig 回退到原始 NSUserDefaults，
+// 实现真正的配置隔离。新账号创建时会自动复制原始默认值。
 // ============================================================
 
 %hook NSUserDefaults
@@ -208,9 +211,8 @@ static OSStatus hooked_SecItemDelete(CFDictionaryRef query);
         return %orig;
     }
     
-    // 直接从账号独立的 plist 读取
-    id value = DKReadAccountUserDefault(defaultName);
-    return value ?: %orig;
+    // 仅从账号独立的 plist 读取（不 fallback 到 %orig，实现真正隔离）
+    return DKReadAccountUserDefault(defaultName);
 }
 
 - (void)setObject:(id)value forKey:(NSString *)defaultName {
@@ -226,11 +228,8 @@ static OSStatus hooked_SecItemDelete(CFDictionaryRef query);
         return;
     }
     
-    // 直接写入账号独立的 plist
+    // 仅写入账号独立的 plist（不写入原始 NSUserDefaults，实现真正隔离）
     DKWriteAccountUserDefault(defaultName, value);
-    
-    // 也写入原始（保持兼容性）
-    %orig;
 }
 
 - (void)removeObjectForKey:(NSString *)defaultName {
@@ -246,10 +245,8 @@ static OSStatus hooked_SecItemDelete(CFDictionaryRef query);
         return;
     }
     
-    // 直接从账号独立的 plist 移除
+    // 仅从账号独立的 plist 移除
     DKWriteAccountUserDefault(defaultName, nil);
-    
-    %orig;
 }
 
 - (BOOL)synchronize {
@@ -271,15 +268,9 @@ static OSStatus hooked_SecItemDelete(CFDictionaryRef query);
         return %orig;
     }
     
-    // 合并账号数据和原始数据
-    id origDict = %orig;
-    NSMutableDictionary *merged = [origDict mutableCopy];
+    // 仅返回账号独立的 plist 数据（不合并原始数据）
     NSDictionary *accountDict = DKReadAccountUserDefaultsDictionary();
-    if (accountDict) {
-        [merged addEntriesFromDictionary:accountDict];
-    }
-    
-    return merged;
+    return accountDict ?: @{};
 }
 
 %end
