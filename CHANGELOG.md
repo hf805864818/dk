@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.0.11] - 2026-07-16
+
+- d38dd1c fix: 修复refreshAccountList默认账号恢复逻辑 + saveCurrentState写入原NSUserDefaults
+
+
 ## [1.0.10] - 2026-07-16
 
 - 06aa633 fix: 将POSIX Hook函数声明移到%ctor之前解决编译错误
