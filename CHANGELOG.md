@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.0.34] - 2026-07-16
+
+- 8370a17 fix: 移除 dk.plist 中错误的 com.apple.AppStore 过滤 + 增强诊断日志
+
+
 ## [1.0.33] - 2026-07-16
 
 - 53581d5 fix: .dk_current_account 写入被文件Hook重定向到子账号隔离目录
