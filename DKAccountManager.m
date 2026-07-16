@@ -223,9 +223,10 @@ static NSString *_accountsRootPath = nil;
         return NO;
     }
     
-    _isSwitching = YES;
-    
     // 1. 保存当前账号的网络会话状态
+    // 注意：这里不能把 isSwitching 设为 YES。
+    // isSwitching 会让 UserDefaults Hook 直接走原始存储，
+    // 如果当前是 B 账号，会错误读取/写入默认账号的登录态。
     [[DKNetworkSessionManager sharedManager] saveCurrentSession];
     
     // 2. 保存当前账号的 UserDefaults 同步
@@ -236,16 +237,16 @@ static NSString *_accountsRootPath = nil;
     _currentAccountName = name;
     
     // 4. 保存当前活跃账号
-    [[NSUserDefaults standardUserDefaults] setObject:name forKey:kDKCurrentAccountKey];
-    [[NSUserDefaults standardUserDefaults] synchronize];
+    // 只有插件自己的当前账号标记需要写入原始 NSUserDefaults，
+    // 因此把 isSwitching 的作用范围缩小到 saveCurrentState 内部。
+    [self saveCurrentState];
     
     // 5. 恢复目标账号的网络会话
+    // 此时 isSwitching 必须为 NO，才能让非默认账号恢复到自己的隔离存储。
     [[DKNetworkSessionManager sharedManager] restoreSessionForAccount:name];
     
     // 6. 通知数据隔离层刷新
     [[DKDataIsolation sharedInstance] setup];
-    
-    _isSwitching = NO;
     
     NSLog(@"[DK] 账号切换: %@ -> %@", oldAccount, name);
     
@@ -301,12 +302,13 @@ static NSString *_accountsRootPath = nil;
 #pragma mark - 状态保存与恢复
 
 - (void)saveCurrentState {
-    // 临时开启 isSwitching，确保写入原始 NSUserDefaults（不走 Hook）
+    // 临时开启 isSwitching，确保插件内部状态写入原始 NSUserDefaults（不走账号隔离 Hook）
+    BOOL previousSwitching = _isSwitching;
     _isSwitching = YES;
     [[NSUserDefaults standardUserDefaults] setObject:_currentAccountName
                                               forKey:kDKCurrentAccountKey];
     [[NSUserDefaults standardUserDefaults] synchronize];
-    _isSwitching = NO;
+    _isSwitching = previousSwitching;
 }
 
 - (void)restoreStateForAccount:(NSString *)accountName {

@@ -9,6 +9,8 @@
 // 确保切换账号后无需重新登录
 // ============================================================
 
+static BOOL DKSessionRestoreInProgress = NO;
+
 @implementation DKNetworkSessionManager
 
 + (instancetype)sharedInstance {
@@ -41,27 +43,37 @@
 }
 
 - (void)saveCurrentSession {
-    DKAccountManager *manager = [DKAccountManager sharedManager];
-    NSString *currentAccount = [manager currentAccountName];
-    
-    if ([currentAccount isEqualToString:[manager defaultAccountName]]) {
-        // 默认账号不需要保存
+    // 恢复会话时会批量删除/写入 Cookie，NSHTTPCookieStorage Hook 会触发本方法。
+    // 此时不能备份，否则会把切换前账号的 Cookie 覆盖到目标账号快照里。
+    if (DKSessionRestoreInProgress) {
         return;
     }
-    
+
+    DKAccountManager *manager = [DKAccountManager sharedManager];
+    NSString *currentAccount = [manager currentAccountName];
+
+    // 默认账号也必须保存。
+    // NSHTTPCookieStorage 是进程级共享存储，B 账号登录后可能覆盖当前 Cookie；
+    // 如果默认账号不备份，切回默认账号时就容易掉到登录页。
     [self backupSessionForAccount:currentAccount];
 }
 
 - (void)restoreSessionForAccount:(NSString *)accountName {
-    if ([accountName isEqualToString:[[DKAccountManager sharedManager] defaultAccountName]]) {
-        return;
-    }
-    
     NSString *sessionPath = [self sessionPathForAccount:accountName];
     NSFileManager *fm = [NSFileManager defaultManager];
     
     if (![fm fileExistsAtPath:sessionPath]) {
         NSLog(@"[DK] 账号 %@ 没有已保存的会话数据", accountName);
+        // 新增的非默认账号没有会话时，清空当前 Cookie，避免沿用上一个账号。
+        DKAccountManager *manager = [DKAccountManager sharedManager];
+        if (![accountName isEqualToString:[manager defaultAccountName]]) {
+            DKSessionRestoreInProgress = YES;
+            @try {
+                [self _clearAllCookies];
+            } @finally {
+                DKSessionRestoreInProgress = NO;
+            }
+        }
         return;
     }
     
@@ -69,32 +81,37 @@
     NSDictionary *sessionData = [NSDictionary dictionaryWithContentsOfFile:sessionPath];
     if (!sessionData) return;
     
-    // 恢复 Cookie
-    NSArray *cookiesData = sessionData[@"cookies"];
-    if (cookiesData) {
-        [self _restoreCookiesFromData:cookiesData];
-    }
-    
-    // 恢复 HTTP 头部 Token
-    NSDictionary *headers = sessionData[@"authHeaders"];
-    if (headers) {
-        [self _restoreAuthHeaders:headers];
-    }
-    
-    // 恢复 NSURLSession 配置
-    NSData *sessionConfigData = sessionData[@"sessionConfig"];
-    if (sessionConfigData) {
-        [self _restoreSessionConfig:sessionConfigData];
+    DKSessionRestoreInProgress = YES;
+
+    @try {
+        // 恢复 Cookie 前先清理旧 Cookie，避免不同账号互相污染。
+        [self _clearAllCookies];
+
+        // 恢复 Cookie
+        NSArray *cookiesData = sessionData[@"cookies"];
+        if (cookiesData) {
+            [self _restoreCookiesFromData:cookiesData];
+        }
+
+        // 恢复 HTTP 头部 Token
+        NSDictionary *headers = sessionData[@"authHeaders"];
+        if (headers) {
+            [self _restoreAuthHeaders:headers];
+        }
+
+        // 恢复 NSURLSession 配置
+        NSData *sessionConfigData = sessionData[@"sessionConfig"];
+        if (sessionConfigData) {
+            [self _restoreSessionConfig:sessionConfigData];
+        }
+    } @finally {
+        DKSessionRestoreInProgress = NO;
     }
     
     NSLog(@"[DK] 账号 %@ 的网络会话已恢复", accountName);
 }
 
 - (void)backupSessionForAccount:(NSString *)accountName {
-    if ([accountName isEqualToString:[[DKAccountManager sharedManager] defaultAccountName]]) {
-        return;
-    }
-    
     NSMutableDictionary *sessionData = [NSMutableDictionary dictionary];
     
     // 备份 Cookie
@@ -134,6 +151,11 @@
 
 - (NSString *)sessionPathForAccount:(NSString *)accountName {
     DKAccountManager *manager = [DKAccountManager sharedManager];
+    if ([accountName isEqualToString:[manager defaultAccountName]]) {
+        // 默认账号的会话快照放在 DK 自己的数据根目录，避免污染应用原始 Cookie 目录。
+        return [manager.accountsRootPath stringByAppendingPathComponent:@".dk_default_session.plist"];
+    }
+
     NSString *accountPath = [manager dataPathForAccount:accountName];
     return [accountPath stringByAppendingPathComponent:@"Library/Cookies/.dk_session.plist"];
 }
@@ -202,6 +224,14 @@
 }
 
 #pragma mark - Cookie 管理
+
+- (void)_clearAllCookies {
+    NSHTTPCookieStorage *storage = [NSHTTPCookieStorage sharedHTTPCookieStorage];
+    NSArray *cookies = [[storage cookies] copy];
+    for (NSHTTPCookie *cookie in cookies) {
+        [storage deleteCookie:cookie];
+    }
+}
 
 - (NSArray *)_captureCookies {
     NSHTTPCookieStorage *storage = [NSHTTPCookieStorage sharedHTTPCookieStorage];
