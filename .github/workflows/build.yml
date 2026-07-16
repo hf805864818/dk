@@ -1,6 +1,5 @@
 name: DK Tweak CI/CD - Auto Build & Release
 
-# 触发条件：push 到 main 分支（跳过 bot 自动提交）
 on:
   push:
     branches:
@@ -28,7 +27,6 @@ jobs:
   build:
     name: Build DK Tweak
     runs-on: macos-latest
-    # 跳过 bot 自动提交和 [skip ci] 标记的提交
     if: |
       !contains(github.event.head_commit.message, '[skip ci]') &&
       !contains(github.event.head_commit.message, 'chore: bump version')
@@ -57,7 +55,7 @@ jobs:
             echo "$VERSION" > VERSION
           fi
           echo "current_version=$VERSION" >> $GITHUB_OUTPUT
-          echo "📦 Current Version: $VERSION"
+          echo "Current Version: $VERSION"
 
       # ============================================================
       # 3. 自动递增版本号
@@ -71,49 +69,37 @@ jobs:
           IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
 
           case "$BUMP_TYPE" in
-            major)
-              MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
-            minor)
-              MINOR=$((MINOR + 1)); PATCH=0 ;;
-            patch|*)
-              PATCH=$((PATCH + 1)) ;;
+            major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+            minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
+            patch|*) PATCH=$((PATCH + 1)) ;;
           esac
 
           NEW_VERSION="${MAJOR}.${MINOR}.${PATCH}"
           echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
-          echo "🔖 New Version: $NEW_VERSION"
+          echo "New Version: $NEW_VERSION"
 
-          # 更新 VERSION 文件
           echo "$NEW_VERSION" > VERSION
-
-          # 更新 control 文件中的版本号（影响 .deb 包名）
           sed -i '' "s/Version: .*/Version: $NEW_VERSION/" control 2>/dev/null || \
           sed -i "s/Version: .*/Version: $NEW_VERSION/" control
 
-          # 注意：Tweak.x 中的版本号不再需要手动替换
-          # Makefile 编译时自动从 VERSION 文件读取并通过 -DDK_VERSION 宏注入
-
       # ============================================================
-      # 4. 安装 dpkg（用于打包 .deb）
+      # 4. 安装系统依赖
       # ============================================================
       - name: Install Dependencies
         run: |
-          # 安装 dpkg 用于 deb 打包
           if ! command -v dpkg-deb &> /dev/null; then
-            echo "Installing dpkg..."
-            brew install dpkg 2>/dev/null || echo "dpkg may already be available"
+            brew install dpkg
           fi
-
-          # 安装 ldid 用于签名
           if ! command -v ldid &> /dev/null; then
-            echo "Installing ldid..."
-            brew install ldid 2>/dev/null || echo "ldid may already be available"
+            brew install ldid
           fi
-
-          echo "✅ Dependencies installed"
+          # 确保 Perl 模块可用（Theos 依赖）
+          perl -e 'use IO::Compress::Lzma' 2>/dev/null || \
+          brew install perl 2>/dev/null || true
+          echo "Dependencies ready"
 
       # ============================================================
-      # 5. 缓存 Theos 和 SDK
+      # 5. Compute cache key
       # ============================================================
       - name: Compute Theos Cache Key
         run: |
@@ -125,101 +111,71 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ github.workspace }}/theos
-          key: theos-${{ runner.os }}-${{ env.theos_head }}-${{ env.sdks_head }}
+          key: theos2-${{ runner.os }}-${{ env.theos_head }}-${{ env.sdks_head }}
 
       # ============================================================
-      # 6. 安装 Theos（使用 theos-action）
+      # 6. 安装 Theos + SDK（手动，不使用 theos-action 避免兼容性问题）
       # ============================================================
       - name: Setup Theos
         if: steps.cache-theos.outputs.cache-hit != 'true'
-        uses: Randomblock1/theos-action@v1
-        with:
-          theos-dir: 'theos'
-          theos-src: 'https://github.com/theos/theos'
-          theos-sdks: 'https://github.com/theos/sdks'
+        run: |
+          THEOS_DIR="${{ github.workspace }}/theos"
+          echo "Installing Theos to $THEOS_DIR"
 
-      # 如果缓存命中，也确保 theos-action 加载了环境
+          # 克隆 theos（浅克隆加速）
+          git clone --depth 1 --recursive https://github.com/theos/theos.git "$THEOS_DIR"
+
+          # 创建 sdks 目录并下载 SDK
+          rm -rf "$THEOS_DIR/sdks"
+          git clone --depth 1 https://github.com/theos/sdks.git "$THEOS_DIR/sdks"
+
+          echo "Theos installed successfully"
+          ls -la "$THEOS_DIR/sdks/"
+
+      # ============================================================
+      # 7. 验证环境
+      # ============================================================
       - name: Verify Theos
         run: |
           export THEOS="${{ github.workspace }}/theos"
-          if [ ! -d "$THEOS" ]; then
-            echo "⚠️ Theos not found, installing..."
-            # Fallback: clone manually
-            git clone --recursive --depth 1 https://github.com/theos/theos.git "$THEOS"
-            # Clone SDKs
-            if [ ! -d "$THEOS/sdks" ] || [ ! "$(ls -A $THEOS/sdks 2>/dev/null)" ]; then
-              git clone --depth 1 https://github.com/theos/sdks.git "$THEOS/sdks"
-            fi
-          fi
-          echo "Theos path: $THEOS"
-          ls -la "$THEOS/sdks/" 2>/dev/null || echo "No SDKs directory"
-          echo "✅ Theos ready"
+          echo "THEOS=$THEOS"
+          echo "SDKs:"
+          ls -la "$THEOS/sdks/" 2>/dev/null || echo "SDK dir missing"
+          echo "Theos ready"
 
       # ============================================================
-      # 7. 编译 Tweak
+      # 8. 编译
       # ============================================================
       - name: Build Tweak
         run: |
           export THEOS="${{ github.workspace }}/theos"
           export PATH="$THEOS/bin:$PATH"
 
-          echo "🔨 Starting build..."
-          echo "THEOS=$THEOS"
-          echo "PATH=$PATH"
-
-          # 清理旧构建
           make clean 2>/dev/null || true
-
-          # 编译打包
           make package FINALPACKAGE=1
 
-          echo "📦 Build completed!"
-          echo ""
-          echo "=== Build Artifacts ==="
-          ls -la packages/ 2>/dev/null || echo "⚠️ No packages directory"
-          ls -la .theos/obj/ 2>/dev/null | grep dylib || echo "⚠️ No dylib found"
+          echo "=== Packages ==="
+          ls -la packages/ 2>/dev/null || echo "No packages"
+          echo "=== Dylibs ==="
+          find .theos -name "*.dylib" -type f 2>/dev/null || echo "No dylib"
 
       # ============================================================
-      # 8. 收集构建产物
+      # 9. 收集产物
       # ============================================================
       - name: Collect Artifacts
         run: |
           mkdir -p release_artifacts
+          ls packages/*.deb 1>/dev/null 2>&1 && cp packages/*.deb release_artifacts/
 
-          # 复制 .deb 文件
-          if ls packages/*.deb 1>/dev/null 2>&1; then
-            cp packages/*.deb release_artifacts/
-            echo "✅ .deb collected"
+          FOUND_DYLIB=$(find .theos -name "dk.dylib" -type f 2>/dev/null | head -1)
+          if [ -n "$FOUND_DYLIB" ]; then
+            cp "$FOUND_DYLIB" release_artifacts/
           fi
 
-          # 复制 .dylib 文件
-          DYLIB_FOUND=false
-          if [ -f ".theos/obj/debug/arm64/dk.dylib" ]; then
-            cp .theos/obj/debug/arm64/dk.dylib release_artifacts/
-            DYLIB_FOUND=true
-          elif [ -f ".theos/obj/dk.dylib" ]; then
-            cp .theos/obj/dk.dylib release_artifacts/
-            DYLIB_FOUND=true
-          else
-            FOUND_DYLIB=$(find .theos -name "dk.dylib" -type f 2>/dev/null | head -1)
-            if [ -n "$FOUND_DYLIB" ]; then
-              cp "$FOUND_DYLIB" release_artifacts/
-              DYLIB_FOUND=true
-            fi
-          fi
-
-          if [ "$DYLIB_FOUND" = true ]; then
-            echo "✅ .dylib collected"
-          else
-            echo "⚠️ No .dylib found"
-          fi
-
-          echo ""
-          echo "=== Release Artifacts ==="
           ls -la release_artifacts/
 
       # ============================================================
-      # 9. 生成更新日志
+      # 10. 生成更新日志
       # ============================================================
       - name: Generate Changelog
         id: changelog
@@ -227,7 +183,6 @@ jobs:
           NEW_VERSION="${{ steps.bump.outputs.new_version }}"
           TODAY=$(date +%Y-%m-%d)
 
-          # 获取最近的 commit 消息
           LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
           if [ -z "$LAST_TAG" ]; then
             COMMITS=$(git log --oneline --no-merges -10)
@@ -235,52 +190,43 @@ jobs:
             COMMITS=$(git log ${LAST_TAG}..HEAD --oneline --no-merges)
           fi
 
-          CHANGELOG_ENTRY="## [${NEW_VERSION}] - ${TODAY}"
-          CHANGELOG_ENTRY+=$'\n\n'
+          CHANGELOG_ENTRY="## [${NEW_VERSION}] - ${TODAY}"$'\n\n'
           if [ -z "$COMMITS" ]; then
             CHANGELOG_ENTRY+="- 自动构建版本更新"
           else
             while IFS= read -r line; do
-              if [ -n "$line" ]; then
-                CHANGELOG_ENTRY+="- ${line}"$'\n'
-              fi
+              [ -n "$line" ] && CHANGELOG_ENTRY+="- ${line}"$'\n'
             done <<< "$COMMITS"
           fi
 
-          # 更新 CHANGELOG.md
           if [ -f CHANGELOG.md ]; then
             HEADER=$(head -1 CHANGELOG.md)
             CONTENT=$(tail -n +2 CHANGELOG.md)
             printf "%s\n\n%s\n%s" "$HEADER" "$CHANGELOG_ENTRY" "$CONTENT" > CHANGELOG.md
           fi
 
-          # 写入 GitHub Actions 输出（需要转义换行）
           echo "changelog_entry<<DKEOF" >> $GITHUB_OUTPUT
           echo "$CHANGELOG_ENTRY" >> $GITHUB_OUTPUT
           echo "DKEOF" >> $GITHUB_OUTPUT
 
-          echo "📝 Changelog generated"
-
       # ============================================================
-      # 10. 提交版本号更新（[skip ci] 防止循环触发）
+      # 11. 提交版本号
       # ============================================================
       - name: Commit Version Bump
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-
           git add VERSION control CHANGELOG.md
-          git commit -m "chore: bump version to ${{ steps.bump.outputs.new_version }} [skip ci]" || echo "No changes to commit"
+          git commit -m "chore: bump version to ${{ steps.bump.outputs.new_version }} [skip ci]" || echo "No changes"
           git tag "v${{ steps.bump.outputs.new_version }}"
 
       - name: Push Changes
-        run: |
-          git push origin main --tags
+        run: git push origin main --tags
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       # ============================================================
-      # 11. 创建 GitHub Release
+      # 12. 创建 Release
       # ============================================================
       - name: Create Release
         uses: softprops/action-gh-release@v2
@@ -293,12 +239,8 @@ jobs:
             ${{ steps.changelog.outputs.changelog_entry }}
 
             ### 构建产物
-            - `dk.deb` — Cydia / Sileo / Zebra 安装包（推荐）
-            - `dk.dylib` — 动态链接库（手动注入用）
-
-            ### 安装方式
-            1. **推荐**：使用包管理器安装 `.deb` 文件
-            2. **手动**：将 `dk.dylib` 注入到目标 App 中
+            - `dk.deb` — Cydia / Sileo / Zebra 安装包
+            - `dk.dylib` — 动态链接库
           files: release_artifacts/*
           draft: false
           prerelease: false
@@ -306,7 +248,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       # ============================================================
-      # 12. 上传构建产物为 Artifact
+      # 13. Artifact
       # ============================================================
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4

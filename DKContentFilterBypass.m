@@ -31,7 +31,9 @@ static NSUInteger _bypassCount = 0;
 - (instancetype)init {
     self = [super init];
     if (self) {
-        _enabled = YES;
+        // 从 UserDefaults 恢复开关状态（默认开启）
+        NSNumber *saved = [[NSUserDefaults standardUserDefaults] objectForKey:@"DK_ContentFilterBypass_Enabled"];
+        _enabled = saved ? [saved boolValue] : YES;
         _bypassCount = 0;
         _statistics = [NSMutableDictionary dictionary];
         
@@ -315,6 +317,9 @@ static NSUInteger _bypassCount = 0;
 
 - (void)setEnabled:(BOOL)enabled {
     _enabled = enabled;
+    // 持久化开关状态
+    [[NSUserDefaults standardUserDefaults] setBool:enabled forKey:@"DK_ContentFilterBypass_Enabled"];
+    [[NSUserDefaults standardUserDefaults] synchronize];
     NSLog(@"[DK] 敏感词过滤绕过: %@", enabled ? @"已启用" : @"已禁用");
 }
 

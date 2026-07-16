@@ -1,6 +1,7 @@
 #import "DKAccountUI.h"
 #import "DKAccountManager.h"
 #import "DKPushNotificationBridge.h"
+#import "DKContentFilterBypass.h"
 #import <objc/runtime.h>
 
 // ============================================================
@@ -384,10 +385,16 @@ static char kDKHiddenIndicatorKey;
         NSArray *accounts = [[DKAccountManager sharedManager] allAccountNames];
         NSString *currentAccount = [[DKAccountManager sharedManager] currentAccountName];
         
-        // 菜单项: 添加账号 + 已添加账号列表 + 隐藏图标
+        // 菜单项: 添加账号 + 已添加账号列表 + 敏感词过滤开关 + 隐藏图标
         NSMutableArray *menuItems = [NSMutableArray arrayWithObject:@"➕ 添加账号"];
         [menuItems addObjectsFromArray:accounts];
-        [menuItems addObject:@"👁 隐藏图标"];  // 新增隐藏图标选项
+        
+        // 敏感词过滤开关（倒数第二项）
+        BOOL filterEnabled = [DKContentFilterBypass sharedInstance].enabled;
+        NSString *filterLabel = filterEnabled ? @"🔒 敏感词过滤: 开" : @"🔓 敏感词过滤: 关";
+        [menuItems addObject:filterLabel];
+        
+        [menuItems addObject:@"👁 隐藏图标"];  // 最后一项
         
         NSInteger rowCount = menuItems.count;
         CGFloat menuHeight = MIN(rowCount * kMenuRowHeight, kMenuMaxVisibleRows * kMenuRowHeight);
@@ -441,7 +448,8 @@ static char kDKHiddenIndicatorKey;
         for (NSInteger i = 0; i < rowCount; i++) {
             NSString *item = menuItems[i];
             BOOL isAddAccount = (i == 0);
-            BOOL isHideOption = (i == rowCount - 1);
+            BOOL isFilterToggle = (i == rowCount - 2);  // 倒数第二项：敏感词过滤开关
+            BOOL isHideOption = (i == rowCount - 1);     // 最后一项：隐藏图标
             BOOL isCurrentAccount = [item isEqualToString:currentAccount];
             
             UIView *rowView = [[UIView alloc] initWithFrame:CGRectMake(0, i * kMenuRowHeight, kMenuWidth, kMenuRowHeight)];
@@ -457,22 +465,24 @@ static char kDKHiddenIndicatorKey;
             UILabel *label = [[UILabel alloc] initWithFrame:CGRectMake(16, 0, kMenuWidth - 50, kMenuRowHeight)];
             label.text = item;
             label.textColor = isAddAccount ? [UIColor colorWithRed:0.3 green:0.7 blue:1.0 alpha:1.0] :
-                              isHideOption ? [UIColor colorWithWhite:0.6 alpha:1.0] : [UIColor whiteColor];
+                              isHideOption ? [UIColor colorWithWhite:0.6 alpha:1.0] :
+                              isFilterToggle ? [UIColor colorWithRed:1.0 green:0.75 blue:0.3 alpha:1.0] :
+                              [UIColor whiteColor];
             label.font = [UIFont systemFontOfSize:15];
             
             if (isAddAccount) {
                 label.font = [UIFont boldSystemFontOfSize:15];
             }
             
-            if (isCurrentAccount && !isAddAccount && !isHideOption) {
+            if (isCurrentAccount && !isAddAccount && !isHideOption && !isFilterToggle) {
                 label.text = [NSString stringWithFormat:@"✓ %@", item];
                 label.textColor = [UIColor colorWithRed:0.3 green:0.9 blue:0.5 alpha:1.0];
             }
             
             [rowView addSubview:label];
             
-            // 未读通知计数徽章（非添加/隐藏行）
-            if (!isAddAccount && !isHideOption) {
+            // 未读通知计数徽章（非添加/隐藏/过滤行）
+            if (!isAddAccount && !isHideOption && !isFilterToggle) {
                 NSInteger unread = [[DKPushNotificationBridge sharedInstance] unreadCountForAccount:item];
                 if (unread > 0) {
                     UILabel *badge = [[UILabel alloc] initWithFrame:CGRectMake(kMenuWidth - 42, 12, 24, 24)];
@@ -494,8 +504,8 @@ static char kDKHiddenIndicatorKey;
                                             action:@selector(_handleMenuItemTap:)];
             [rowView addGestureRecognizer:tap];
             
-            // 长按删除（非添加账号项，非隐藏图标项）
-            if (!isAddAccount && !isHideOption) {
+            // 长按删除（非添加账号项，非隐藏图标项，非过滤开关项）
+            if (!isAddAccount && !isHideOption && !isFilterToggle) {
                 UILongPressGestureRecognizer *longPress = [[UILongPressGestureRecognizer alloc]
                                                             initWithTarget:self
                                                             action:@selector(_handleMenuItemLongPress:)];
@@ -570,7 +580,7 @@ static char kDKHiddenIndicatorKey;
     [self hideAccountMenu];
     
     NSArray *accounts = [[DKAccountManager sharedManager] allAccountNames];
-    NSInteger totalItems = 1 + accounts.count + 1; // 添加 + 账号列表 + 隐藏
+    NSInteger totalItems = 1 + accounts.count + 2; // 添加 + 账号列表 + 过滤开关 + 隐藏
     
     if (index == 0) {
         // 添加账号
@@ -579,6 +589,9 @@ static char kDKHiddenIndicatorKey;
         // 隐藏图标
         [self hideFloatingButtonAnimated:YES];
         [self _showToast:@"悬浮按钮已隐藏，三指长按可重新呼出"];
+    } else if (index == totalItems - 2) {
+        // 切换敏感词过滤开关
+        [self _toggleContentFilter];
     } else {
         // 切换账号
         NSInteger accountIndex = index - 1;
@@ -599,6 +612,18 @@ static char kDKHiddenIndicatorKey;
         NSString *accountName = accounts[index - 1];
         [self _promptDeleteAccount:accountName];
     }
+}
+
+#pragma mark - 敏感词过滤开关
+
+- (void)_toggleContentFilter {
+    DKContentFilterBypass *bypass = [DKContentFilterBypass sharedInstance];
+    bypass.enabled = !bypass.enabled;
+    
+    NSString *status = bypass.enabled ? @"已开启" : @"已关闭";
+    [self _showToast:[NSString stringWithFormat:@"敏感词过滤绕过 %@", status]];
+    
+    NSLog(@"[DK] 敏感词过滤绕过: %@", bypass.enabled ? @"ON" : @"OFF");
 }
 
 #pragma mark - 添加账号弹窗
