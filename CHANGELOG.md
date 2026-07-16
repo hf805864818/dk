@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.0.3] - 2026-07-16
+
+- 645f1f8 fix: 将所有 %hook 块移到 %ctor 之前
+- 25cff54 ci: 强制重新编译（清除缓存）
+- 599c07a fix: %init 移到 %ctor 最开头（autoreleasepool 之前）
+- 0482c5b fix: %ctor 中缺少 %init; 导致所有 %hook 不生效
+
+
 ## [1.0.2] - 2026-07-16
 
 - 2d24488 fix: 全面修复三指长按无反应问题
