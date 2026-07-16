@@ -14,9 +14,7 @@
 #import <Security/Security.h>
 #import <substrate.h>
 #import <UserNotifications/UserNotifications.h>
-#import <sys/stat.h>
-#import <unistd.h>
-#import <fcntl.h>
+#import "fishhook/fishhook.h"
 
 #import "DKAccountManager.h"
 #import "DKAccountUI.h"
@@ -857,28 +855,7 @@ didReceiveNotificationResponse:(UNNotificationResponse *)response
 
 %end
 
-// ============================================================
-// POSIX Hook 函数前向声明（必须在 %ctor 之前，否则 Logos 报错）
-// ============================================================
-static BOOL _dk_fopen_hook_guard = NO;
-FILE* (*original_fopen)(const char *path, const char *mode);
-FILE* hooked_fopen(const char *path, const char *mode);
 
-static BOOL _dk_open_hook_guard = NO;
-int (*original_open)(const char *path, int flags, mode_t mode);
-int hooked_open(const char *path, int flags, mode_t mode);
-
-static BOOL _dk_stat_hook_guard = NO;
-int (*original_stat)(const char *path, struct stat *buf);
-int hooked_stat(const char *path, struct stat *buf);
-
-static BOOL _dk_access_hook_guard = NO;
-int (*original_access)(const char *path, int mode);
-int hooked_access(const char *path, int mode);
-
-static BOOL _dk_openat_hook_guard = NO;
-int (*original_openat)(int fd, const char *path, int flags, mode_t mode);
-int hooked_openat(int fd, const char *path, int flags, mode_t mode);
 
 // ============================================================
 // 构造函数 - 插件加载时调用
@@ -999,28 +976,31 @@ int hooked_openat(int fd, const char *path, int flags, mode_t mode);
                 }
 
                 // ============================================
-                // 第三步：安装 C 函数 Hook（MSHookFunction）
+                // 第三步：安装 C 函数 Hook（fishhook rebind_symbols）
+                // 使用 fishhook 替代 MSHookFunction，避免 iOS 17 W^X 保护导致崩溃。
+                // fishhook 只修改 __DATA 段的 GOT/PLT 符号指针，不修改 __TEXT 代码页。
+                //
+                // 精简策略：POSIX 文件 I/O Hook (fopen/open/stat/access/openat)
+                // 已移除。ObjC 层的 %hook 块已覆盖 NSFileManager、NSData、NSString、
+                // NSDictionary、NSArray、NSFileHandle、NSKeyedArchiver 等所有文件操作 API，
+                // 足以实现完整的文件隔离。
+                // 保留 Keychain + CFPreferences Hook，因为：
+                // 1. Keychain 无 ObjC 层 Hook 覆盖，是账号隔离的核心
+                // 2. TTAccountSDK 可能通过 CFPreferences 绕过 NSUserDefaults 直接读写
                 // ============================================
-                // Keychain
-                MSHookFunction((void *)SecItemAdd, (void *)hooked_SecItemAdd, (void **)&original_SecItemAdd);
-                MSHookFunction((void *)SecItemCopyMatching, (void *)hooked_SecItemCopyMatching, (void **)&original_SecItemCopyMatching);
-                MSHookFunction((void *)SecItemUpdate, (void *)hooked_SecItemUpdate, (void **)&original_SecItemUpdate);
-                MSHookFunction((void *)SecItemDelete, (void *)hooked_SecItemDelete, (void **)&original_SecItemDelete);
-                NSLog(@"[DK] Keychain Hook 已安装");
-
-                // CFPreferences
-                MSHookFunction((void *)CFPreferencesSetAppValue, (void *)hooked_CFPreferencesSetAppValue, (void **)&original_CFPreferencesSetAppValue);
-                MSHookFunction((void *)CFPreferencesCopyAppValue, (void *)hooked_CFPreferencesCopyAppValue, (void **)&original_CFPreferencesCopyAppValue);
-                MSHookFunction((void *)CFPreferencesAppSynchronize, (void *)hooked_CFPreferencesAppSynchronize, (void **)&original_CFPreferencesAppSynchronize);
-                NSLog(@"[DK] CFPreferences Hook 已安装");
-
-                // POSIX 文件 I/O
-                MSHookFunction((void *)fopen, (void *)hooked_fopen, (void **)&original_fopen);
-                MSHookFunction((void *)open, (void *)hooked_open, (void **)&original_open);
-                MSHookFunction((void *)stat, (void *)hooked_stat, (void **)&original_stat);
-                MSHookFunction((void *)access, (void *)hooked_access, (void **)&original_access);
-                MSHookFunction((void *)openat, (void *)hooked_openat, (void **)&original_openat);
-                NSLog(@"[DK] POSIX Hook 已安装");
+                static struct rebinding rebindings[] = {
+                    // Keychain（4 个）
+                    {"SecItemAdd",            hooked_SecItemAdd,            (void **)&original_SecItemAdd},
+                    {"SecItemCopyMatching",   hooked_SecItemCopyMatching,   (void **)&original_SecItemCopyMatching},
+                    {"SecItemUpdate",         hooked_SecItemUpdate,         (void **)&original_SecItemUpdate},
+                    {"SecItemDelete",         hooked_SecItemDelete,         (void **)&original_SecItemDelete},
+                    // CFPreferences（3 个）
+                    {"CFPreferencesSetAppValue",    hooked_CFPreferencesSetAppValue,    (void **)&original_CFPreferencesSetAppValue},
+                    {"CFPreferencesCopyAppValue",   hooked_CFPreferencesCopyAppValue,   (void **)&original_CFPreferencesCopyAppValue},
+                    {"CFPreferencesAppSynchronize", hooked_CFPreferencesAppSynchronize, (void **)&original_CFPreferencesAppSynchronize},
+                };
+                rebind_symbols(rebindings, sizeof(rebindings) / sizeof(struct rebinding));
+                NSLog(@"[DK] fishhook C 函数 Hook 已安装（7 个：Keychain 4 + CFPreferences 3）");
 
                 // ============================================
                 // 第四步：完成初始化
@@ -1046,7 +1026,7 @@ int hooked_openat(int fd, const char *path, int flags, mode_t mode);
 // ============================================================
 // Keychain - 钥匙串隔离（C 函数 Hook）
 // 通过给 service/account 添加前缀实现每个账号的独立 Keychain
-// 使用 MSHookFunction 直接 Hook C 函数
+// 使用 fishhook rebind_symbols 重定向符号指针（不修改 __TEXT 代码页）
 // ============================================================
 
 static OSStatus hooked_SecItemAdd(CFDictionaryRef query, CFTypeRef *result) {
@@ -1166,173 +1146,6 @@ static OSStatus hooked_SecItemDelete(CFDictionaryRef query) {
 // 包装覆盖。对于流式 API，数据在 completion 中统一处理。
 // 如需更精细的逐块拦截，可在运行时通过 MSHookMessageEx 动态绑定。
 // ============================================================
-
-// ============================================================
-// POSIX fopen Hook — 捕获 Flutter dart:io 的底层文件 I/O
-// Flutter 的 File 类使用 C 标准库的 fopen/fread/fwrite 进行文件操作，
-// 这些底层调用不会被 Foundation 层的 %hook 拦截。
-// 通过 MSHookFunction 直接修改 fopen 的机器码指令，实现路径重定向。
-// ============================================================
-
-FILE* hooked_fopen(const char *path, const char *mode) {
-    if (_dkStartupGuard) return original_fopen(path, mode);
-    // 递归保护：如果已经在 hooked_fopen 中，直接走原始实现
-    if (_dk_fopen_hook_guard) {
-        return original_fopen(path, mode);
-    }
-
-    _dk_fopen_hook_guard = YES;
-
-    FILE *result = NULL;
-    if (path) {
-        NSString *nsPath = [NSString stringWithUTF8String:path];
-        NSString *remapped = DKRemapFilePath(nsPath);
-        if (remapped && remapped != nsPath) {
-            const char *newPath = [remapped UTF8String];
-            result = original_fopen(newPath, mode);
-        } else {
-            result = original_fopen(path, mode);
-        }
-    } else {
-        result = original_fopen(path, mode);
-    }
-
-    _dk_fopen_hook_guard = NO;
-    return result;
-}
-
-// ============================================================
-// POSIX open() Hook — 捕获 Flutter dart:io 的二进制文件 I/O
-// Flutter 的 File.readAsBytes() / File.writeAsBytes() / RandomAccessFile
-// 使用 open() 而非 fopen()。这是 dart:io 最核心的文件操作函数。
-// ============================================================
-
-int hooked_open(const char *path, int flags, mode_t mode) {
-    if (_dkStartupGuard) return original_open(path, flags, mode);
-    // 递归保护
-    if (_dk_open_hook_guard) {
-        return original_open(path, flags, mode);
-    }
-
-    _dk_open_hook_guard = YES;
-
-    int result = -1;
-    if (path) {
-        NSString *nsPath = [NSString stringWithUTF8String:path];
-        NSString *remapped = DKRemapFilePath(nsPath);
-        if (remapped && remapped != nsPath) {
-            const char *newPath = [remapped UTF8String];
-            result = original_open(newPath, flags, mode);
-        } else {
-            result = original_open(path, flags, mode);
-        }
-    } else {
-        result = original_open(path, flags, mode);
-    }
-
-    _dk_open_hook_guard = NO;
-    return result;
-}
-
-// ============================================================
-// POSIX stat() Hook — 捕获 Flutter dart:io 的文件存在性/元数据查询
-// Flutter 的 File.exists() / File.stat() / Directory.exists()
-// 使用 stat() 检查文件是否存在和获取元数据。
-// ============================================================
-
-int hooked_stat(const char *path, struct stat *buf) {
-    if (_dkStartupGuard) return original_stat(path, buf);
-    // 递归保护
-    if (_dk_stat_hook_guard) {
-        return original_stat(path, buf);
-    }
-
-    _dk_stat_hook_guard = YES;
-
-    int result = -1;
-    if (path) {
-        NSString *nsPath = [NSString stringWithUTF8String:path];
-        NSString *remapped = DKRemapFilePath(nsPath);
-        if (remapped && remapped != nsPath) {
-            const char *newPath = [remapped UTF8String];
-            result = original_stat(newPath, buf);
-        } else {
-            result = original_stat(path, buf);
-        }
-    } else {
-        result = original_stat(path, buf);
-    }
-
-    _dk_stat_hook_guard = NO;
-    return result;
-}
-
-// ============================================================
-// POSIX access() Hook — 捕获 Flutter dart:io 的文件可访问性检查
-// Flutter 的某些文件操作使用 access() 检查文件是否存在。
-// ============================================================
-
-int hooked_access(const char *path, int mode) {
-    if (_dkStartupGuard) return original_access(path, mode);
-    // 递归保护
-    if (_dk_access_hook_guard) {
-        return original_access(path, mode);
-    }
-
-    _dk_access_hook_guard = YES;
-
-    int result = -1;
-    if (path) {
-        NSString *nsPath = [NSString stringWithUTF8String:path];
-        NSString *remapped = DKRemapFilePath(nsPath);
-        if (remapped && remapped != nsPath) {
-            const char *newPath = [remapped UTF8String];
-            result = original_access(newPath, mode);
-        } else {
-            result = original_access(path, mode);
-        }
-    } else {
-        result = original_access(path, mode);
-    }
-
-    _dk_access_hook_guard = NO;
-    return result;
-}
-
-// ============================================================
-// POSIX openat() Hook — 捕获 Flutter dart:io 的现代文件 I/O
-// Flutter 的 dart:io 在 iOS 上使用 openat() 而非 open() 系统调用。
-// 这是最关键的 Hook，因为 NSUserDefaults 的 plist 文件读写
-// 也可能通过 openat() 进行。没有这个 Hook，B 账号下 Flutter 引擎
-// 会直接读写原始文件，导致 A 的登录数据被覆盖。
-// ============================================================
-
-int hooked_openat(int fd, const char *path, int flags, mode_t mode) {
-    if (_dkStartupGuard) return original_openat(fd, path, flags, mode);
-    // 递归保护
-    if (_dk_openat_hook_guard) {
-        return original_openat(fd, path, flags, mode);
-    }
-
-    _dk_openat_hook_guard = YES;
-
-    int result = -1;
-    if (path) {
-        NSString *nsPath = [NSString stringWithUTF8String:path];
-        NSString *remapped = DKRemapFilePath(nsPath);
-        if (remapped && remapped != nsPath) {
-            const char *newPath = [remapped UTF8String];
-            result = original_openat(fd, newPath, flags, mode);
-        } else {
-            result = original_openat(fd, path, flags, mode);
-        }
-    } else {
-        result = original_openat(fd, path, flags, mode);
-    }
-
-    _dk_openat_hook_guard = NO;
-    return result;
-}
 
 // ============================================================
 // CFPreferences C 函数 Hook 实现

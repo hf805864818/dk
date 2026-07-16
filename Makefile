@@ -34,7 +34,8 @@ dk_FILES = Tweak.x \
            DKKeychainHook.m \
            DKNetworkSessionManager.m \
            DKPushNotificationBridge.m \
-           DKContentFilterBypass.m
+           DKContentFilterBypass.m \
+           fishhook/fishhook.c
 
 # 编译选项 — 版本号作为预处理器宏注入
 dk_CFLAGS = -fobjc-arc -Wno-error -I. \
