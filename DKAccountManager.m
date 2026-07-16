@@ -110,14 +110,23 @@ static NSString *_accountsRootPath = nil;
         }
     }
     
-    // 读取上次活跃账号
+    // 重要：先临时设为默认账号，这样 NSUserDefaults Hook 的 objectForKey 走 %orig，
+    // 读取原始 NSUserDefaults（而非某个账号的独立 plist），确保读到正确的保存状态
+    _currentAccountName = kDKDefaultAccountName;
+    
+    // 读取上次活跃账号（从原始 NSUserDefaults 读取）
     NSString *saved = [[NSUserDefaults standardUserDefaults] stringForKey:kDKCurrentAccountKey];
-    if (saved && [_accountNames containsObject:saved]) {
-        _currentAccountName = saved;
-    } else if (_accountNames.count > 0) {
-        _currentAccountName = _accountNames.firstObject;
+    if (saved) {
+        if ([saved isEqualToString:kDKDefaultAccountName]) {
+            _currentAccountName = kDKDefaultAccountName;
+        } else if ([_accountNames containsObject:saved]) {
+            _currentAccountName = saved;
+        } else {
+            // 保存的账号已不存在，回退到第一个可用账号或默认
+            _currentAccountName = _accountNames.count > 0 ? _accountNames.firstObject : kDKDefaultAccountName;
+        }
     } else {
-        _currentAccountName = kDKDefaultAccountName;
+        _currentAccountName = _accountNames.count > 0 ? _accountNames.firstObject : kDKDefaultAccountName;
     }
 }
 
@@ -292,10 +301,12 @@ static NSString *_accountsRootPath = nil;
 #pragma mark - 状态保存与恢复
 
 - (void)saveCurrentState {
-    // 保存当前活跃账号标记
+    // 临时开启 isSwitching，确保写入原始 NSUserDefaults（不走 Hook）
+    _isSwitching = YES;
     [[NSUserDefaults standardUserDefaults] setObject:_currentAccountName
                                               forKey:kDKCurrentAccountKey];
     [[NSUserDefaults standardUserDefaults] synchronize];
+    _isSwitching = NO;
 }
 
 - (void)restoreStateForAccount:(NSString *)accountName {
