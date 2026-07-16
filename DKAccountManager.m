@@ -438,10 +438,13 @@ static NSString *_accountsRootPath = nil;
     [[NSUserDefaults standardUserDefaults] setObject:_currentAccountName
                                               forKey:kDKCurrentAccountKey];
     [[NSUserDefaults standardUserDefaults] synchronize];
-    _isSwitching = previousSwitching;
 
-    // 同时写入独立文件，避免 exit(0) 时 cfprefsd 尚未落盘导致状态丢失。
+    // 独立文件写入也必须在 isSwitching=YES 期间完成。
+    // 否则 _currentAccountName 可能已是子账号名，文件 Hook 会
+    // 把 .dk_current_account 重定向到子账号隔离目录，下次启动读不到。
     [self _saveCurrentAccountToFile:_currentAccountName];
+
+    _isSwitching = previousSwitching;
 }
 
 - (void)restoreStateForAccount:(NSString *)accountName {
