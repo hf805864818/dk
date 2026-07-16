@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.0.9] - 2026-07-16
+
+- 27e01c4 fix: 添加 NSData/NSDictionary/NSArray 等文件操作 Hook
+
+
 ## [1.0.8] - 2026-07-16
 
 - 7e5e395 fix: 真正修复账号隔离 + 添加 exit(0) 重启
