@@ -3,6 +3,7 @@
 #import "DKNetworkSessionManager.h"
 #import <UIKit/UIKit.h>
 #import <Security/Security.h>
+#import <unistd.h>
 
 // ============================================================
 // 账号元数据存储键
@@ -438,8 +439,19 @@ static NSString *_accountsRootPath = nil;
 
                 NSLog(@"[DK] 账号切换完成: %@ -> %@，即将退出应用", oldAccount, name);
 
-                // 退出应用，让用户重新打开后以新账号运行
-                exit(0);
+                // 在 exit(0) 之前强制刷新所有数据到磁盘。
+                // Keychain 操作是同步的，NSUserDefaults 已调用 synchronize，
+                // 但 NSHTTPCookieStorage 的 setCookie: 是异步写盘的。
+                // 若不刷新，Cookie 可能丢失，导致下次启动时进入登录页。
+                sync();  // 刷新所有文件系统缓冲区
+                [[NSUserDefaults standardUserDefaults] synchronize];
+
+                // 延迟退出让 RunLoop 有机会处理异步操作（Cookie 持久化等）
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
+                               dispatch_get_main_queue(), ^{
+                    // 退出应用，让用户重新打开后以新账号运行
+                    exit(0);
+                });
             }]];
             [rootVC presentViewController:alert animated:YES completion:nil];
         }

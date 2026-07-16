@@ -1017,12 +1017,14 @@ didReceiveNotificationResponse:(UNNotificationResponse *)response
                 // 启动会话定期刷新
                 [[DKNetworkSessionManager sharedManager] scheduleSessionRefresh];
 
-                // 默认账号快照
+                // 启动时不主动快照默认账号。
+                // 会话快照在手动切换账号时（switchToAccount:）保存，
+                // 以及在进入后台/终止时自动保存。启动时快照可能因
+                // exit(0) 前 Cookie 未刷盘而覆盖正确的会话文件。
                 DKAccountManager *manager = [DKAccountManager sharedManager];
                 DKNetworkSessionManager *sessionManager = [DKNetworkSessionManager sharedManager];
-                if ([[manager currentAccountName] isEqualToString:[manager defaultAccountName]]) {
-                    [sessionManager snapshotDefaultSessionIfActive];
-                } else if (![sessionManager hasSessionSnapshotForAccount:[manager defaultAccountName]]) {
+                if (![[manager currentAccountName] isEqualToString:[manager defaultAccountName]] &&
+                    ![sessionManager hasSessionSnapshotForAccount:[manager defaultAccountName]]) {
                     NSLog(@"[DK] 当前为子账号 %@，默认账号暂无快照；切回默认并登录后会自动保存",
                           [manager currentAccountName]);
                 }
