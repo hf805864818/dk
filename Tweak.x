@@ -48,7 +48,9 @@ extern id DKReadAccountUserDefault(NSString *key);
 extern void DKWriteAccountUserDefault(NSString *key, id value);
 extern NSDictionary* DKReadAccountUserDefaultsDictionary(void);
 extern NSDictionary* DKRemapKeychainQuery(NSDictionary *query);
+extern NSDictionary* DKRemapKeychainAttributes(NSDictionary *attributes);
 extern NSDictionary* DKUnmapKeychainResult(NSDictionary *result);
+extern BOOL DKKeychainResultMatchesCurrentAccount(NSDictionary *result);
 
 // ============================================================
 // 获取当前应用的 Bundle ID
@@ -385,14 +387,18 @@ static OSStatus hooked_SecItemDelete(CFDictionaryRef query);
 // 实现真正的配置隔离。新账号创建时会自动复制原始默认值。
 // ============================================================
 
+static BOOL DKShouldUseOriginalDefaults(void) {
+    DKAccountManager *manager = [DKAccountManager sharedManager];
+    if (manager.isSwitching) return YES;
+
+    NSString *currentAccount = [manager currentAccountName];
+    return [currentAccount isEqualToString:[manager defaultAccountName]];
+}
+
 %hook NSUserDefaults
 
 - (id)objectForKey:(NSString *)defaultName {
-    DKAccountManager *manager = [DKAccountManager sharedManager];
-    if (manager.isSwitching) return %orig;
-    
-    NSString *currentAccount = [manager currentAccountName];
-    if ([currentAccount isEqualToString:[manager defaultAccountName]]) {
+    if (DKShouldUseOriginalDefaults()) {
         return %orig;
     }
     
@@ -400,15 +406,64 @@ static OSStatus hooked_SecItemDelete(CFDictionaryRef query);
     return DKReadAccountUserDefault(defaultName);
 }
 
+- (NSString *)stringForKey:(NSString *)defaultName {
+    if (DKShouldUseOriginalDefaults()) return %orig;
+    id value = DKReadAccountUserDefault(defaultName);
+    return [value isKindOfClass:[NSString class]] ? value : nil;
+}
+
+- (NSArray *)arrayForKey:(NSString *)defaultName {
+    if (DKShouldUseOriginalDefaults()) return %orig;
+    id value = DKReadAccountUserDefault(defaultName);
+    return [value isKindOfClass:[NSArray class]] ? value : nil;
+}
+
+- (NSDictionary *)dictionaryForKey:(NSString *)defaultName {
+    if (DKShouldUseOriginalDefaults()) return %orig;
+    id value = DKReadAccountUserDefault(defaultName);
+    return [value isKindOfClass:[NSDictionary class]] ? value : nil;
+}
+
+- (NSData *)dataForKey:(NSString *)defaultName {
+    if (DKShouldUseOriginalDefaults()) return %orig;
+    id value = DKReadAccountUserDefault(defaultName);
+    return [value isKindOfClass:[NSData class]] ? value : nil;
+}
+
+- (NSURL *)URLForKey:(NSString *)defaultName {
+    if (DKShouldUseOriginalDefaults()) return %orig;
+    id value = DKReadAccountUserDefault(defaultName);
+    if ([value isKindOfClass:[NSURL class]]) return value;
+    if ([value isKindOfClass:[NSString class]]) return [NSURL URLWithString:value];
+    return nil;
+}
+
+- (BOOL)boolForKey:(NSString *)defaultName {
+    if (DKShouldUseOriginalDefaults()) return %orig;
+    id value = DKReadAccountUserDefault(defaultName);
+    return [value respondsToSelector:@selector(boolValue)] ? [value boolValue] : NO;
+}
+
+- (NSInteger)integerForKey:(NSString *)defaultName {
+    if (DKShouldUseOriginalDefaults()) return %orig;
+    id value = DKReadAccountUserDefault(defaultName);
+    return [value respondsToSelector:@selector(integerValue)] ? [value integerValue] : 0;
+}
+
+- (float)floatForKey:(NSString *)defaultName {
+    if (DKShouldUseOriginalDefaults()) return %orig;
+    id value = DKReadAccountUserDefault(defaultName);
+    return [value respondsToSelector:@selector(floatValue)] ? [value floatValue] : 0.0f;
+}
+
+- (double)doubleForKey:(NSString *)defaultName {
+    if (DKShouldUseOriginalDefaults()) return %orig;
+    id value = DKReadAccountUserDefault(defaultName);
+    return [value respondsToSelector:@selector(doubleValue)] ? [value doubleValue] : 0.0;
+}
+
 - (void)setObject:(id)value forKey:(NSString *)defaultName {
-    DKAccountManager *manager = [DKAccountManager sharedManager];
-    if (manager.isSwitching) {
-        %orig;
-        return;
-    }
-    
-    NSString *currentAccount = [manager currentAccountName];
-    if ([currentAccount isEqualToString:[manager defaultAccountName]]) {
+    if (DKShouldUseOriginalDefaults()) {
         %orig;
         return;
     }
@@ -417,15 +472,48 @@ static OSStatus hooked_SecItemDelete(CFDictionaryRef query);
     DKWriteAccountUserDefault(defaultName, value);
 }
 
-- (void)removeObjectForKey:(NSString *)defaultName {
-    DKAccountManager *manager = [DKAccountManager sharedManager];
-    if (manager.isSwitching) {
+- (void)setBool:(BOOL)value forKey:(NSString *)defaultName {
+    if (DKShouldUseOriginalDefaults()) {
         %orig;
         return;
     }
-    
-    NSString *currentAccount = [manager currentAccountName];
-    if ([currentAccount isEqualToString:[manager defaultAccountName]]) {
+    DKWriteAccountUserDefault(defaultName, @(value));
+}
+
+- (void)setInteger:(NSInteger)value forKey:(NSString *)defaultName {
+    if (DKShouldUseOriginalDefaults()) {
+        %orig;
+        return;
+    }
+    DKWriteAccountUserDefault(defaultName, @(value));
+}
+
+- (void)setFloat:(float)value forKey:(NSString *)defaultName {
+    if (DKShouldUseOriginalDefaults()) {
+        %orig;
+        return;
+    }
+    DKWriteAccountUserDefault(defaultName, @(value));
+}
+
+- (void)setDouble:(double)value forKey:(NSString *)defaultName {
+    if (DKShouldUseOriginalDefaults()) {
+        %orig;
+        return;
+    }
+    DKWriteAccountUserDefault(defaultName, @(value));
+}
+
+- (void)setURL:(NSURL *)url forKey:(NSString *)defaultName {
+    if (DKShouldUseOriginalDefaults()) {
+        %orig;
+        return;
+    }
+    DKWriteAccountUserDefault(defaultName, url.absoluteString);
+}
+
+- (void)removeObjectForKey:(NSString *)defaultName {
+    if (DKShouldUseOriginalDefaults()) {
         %orig;
         return;
     }
@@ -435,13 +523,7 @@ static OSStatus hooked_SecItemDelete(CFDictionaryRef query);
 }
 
 - (BOOL)synchronize {
-    DKAccountManager *manager = [DKAccountManager sharedManager];
-    // 切换中：直接调用原始实现（写入原始 NSUserDefaults）
-    if (manager.isSwitching) return %orig;
-    
-    NSString *currentAccount = [manager currentAccountName];
-    // 默认账号：直接调用原始实现
-    if ([currentAccount isEqualToString:[manager defaultAccountName]]) {
+    if (DKShouldUseOriginalDefaults()) {
         return %orig;
     }
     
@@ -453,10 +535,7 @@ static OSStatus hooked_SecItemDelete(CFDictionaryRef query);
 }
 
 - (NSDictionary *)dictionaryRepresentation {
-    DKAccountManager *manager = [DKAccountManager sharedManager];
-    NSString *currentAccount = [manager currentAccountName];
-    
-    if ([currentAccount isEqualToString:[manager defaultAccountName]]) {
+    if (DKShouldUseOriginalDefaults()) {
         return %orig;
     }
     
@@ -830,7 +909,13 @@ static OSStatus hooked_SecItemCopyMatching(CFDictionaryRef query, CFTypeRef *res
     
     if (status == errSecSuccess && result && *result) {
         if (CFGetTypeID(*result) == CFDictionaryGetTypeID()) {
-            NSDictionary *unmapped = DKUnmapKeychainResult((__bridge NSDictionary *)(*result));
+            NSDictionary *item = (__bridge NSDictionary *)(*result);
+            if (!DKKeychainResultMatchesCurrentAccount(item)) {
+                if (*result) CFRelease(*result);
+                *result = NULL;
+                return errSecItemNotFound;
+            }
+            NSDictionary *unmapped = DKUnmapKeychainResult(item);
             if (*result) CFRelease(*result);
             *result = (__bridge_retained CFTypeRef)unmapped;
         } else if (CFGetTypeID(*result) == CFArrayGetTypeID()) {
@@ -838,12 +923,19 @@ static OSStatus hooked_SecItemCopyMatching(CFDictionaryRef query, CFTypeRef *res
             NSMutableArray *unmappedItems = [NSMutableArray array];
             for (id item in items) {
                 if ([item isKindOfClass:[NSDictionary class]]) {
+                    if (!DKKeychainResultMatchesCurrentAccount(item)) {
+                        continue;
+                    }
                     [unmappedItems addObject:DKUnmapKeychainResult(item)];
                 } else {
                     [unmappedItems addObject:item];
                 }
             }
             if (*result) CFRelease(*result);
+            if (unmappedItems.count == 0) {
+                *result = NULL;
+                return errSecItemNotFound;
+            }
             *result = (__bridge_retained CFTypeRef)unmappedItems;
         }
     }
@@ -854,7 +946,10 @@ static OSStatus hooked_SecItemCopyMatching(CFDictionaryRef query, CFTypeRef *res
 static OSStatus hooked_SecItemUpdate(CFDictionaryRef query, CFDictionaryRef attributesToUpdate) {
     NSDictionary *nsQuery = (__bridge NSDictionary *)query;
     NSDictionary *mappedQuery = DKRemapKeychainQuery(nsQuery);
-    return original_SecItemUpdate((__bridge CFDictionaryRef)mappedQuery, attributesToUpdate);
+    NSDictionary *nsAttributes = (__bridge NSDictionary *)attributesToUpdate;
+    NSDictionary *mappedAttributes = DKRemapKeychainAttributes(nsAttributes);
+    return original_SecItemUpdate((__bridge CFDictionaryRef)mappedQuery,
+                                  (__bridge CFDictionaryRef)mappedAttributes);
 }
 
 static OSStatus hooked_SecItemDelete(CFDictionaryRef query) {

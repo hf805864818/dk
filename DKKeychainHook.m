@@ -50,26 +50,23 @@ NSDictionary* DKRemapKeychainQuery(NSDictionary *query) {
     
     // 给 kSecAttrService 添加前缀
     id service = query[(__bridge id)kSecAttrService];
-    if (service && [service isKindOfClass:[NSString class]]) {
+    if (service && [service isKindOfClass:[NSString class]] && ![service hasPrefix:prefix]) {
         mappedQuery[(__bridge id)kSecAttrService] = [prefix stringByAppendingString:service];
     }
     
     // 给 kSecAttrAccount 添加前缀
     id account = query[(__bridge id)kSecAttrAccount];
-    if (account && [account isKindOfClass:[NSString class]]) {
+    if (account && [account isKindOfClass:[NSString class]] && ![account hasPrefix:prefix]) {
         mappedQuery[(__bridge id)kSecAttrAccount] = [prefix stringByAppendingString:account];
     }
     
-    // 给 kSecAttrAccessGroup 添加前缀
-    id accessGroup = query[(__bridge id)kSecAttrAccessGroup];
-    if (accessGroup && [accessGroup isKindOfClass:[NSString class]]) {
-        mappedQuery[(__bridge id)kSecAttrAccessGroup] = [[DKDataIsolation sharedInstance]
-                                                          keychainAccessGroupForOriginalGroup:accessGroup];
-    }
+    // 不修改 kSecAttrAccessGroup。
+    // access group 必须匹配应用 entitlement，随意加账号前缀会导致 SecItemAdd/Update 失败，
+    // 进而出现 B/C 账号登录态无法持久化的问题。
     
     // 给 kSecAttrLabel 添加前缀（某些 app 使用 label 而非 service）
     id label = query[(__bridge id)kSecAttrLabel];
-    if (label && [label isKindOfClass:[NSString class]]) {
+    if (label && [label isKindOfClass:[NSString class]] && ![label hasPrefix:prefix]) {
         mappedQuery[(__bridge id)kSecAttrLabel] = [prefix stringByAppendingString:label];
     }
     
@@ -77,11 +74,11 @@ NSDictionary* DKRemapKeychainQuery(NSDictionary *query) {
     id generic = query[(__bridge id)kSecAttrGeneric];
     if (generic) {
         // kSecAttrGeneric 是 CFDataRef，但这里我们只处理 NSString 和 NSData
-        if ([generic isKindOfClass:[NSString class]]) {
+        if ([generic isKindOfClass:[NSString class]] && ![generic hasPrefix:prefix]) {
             mappedQuery[(__bridge id)kSecAttrGeneric] = [prefix stringByAppendingString:generic];
         } else if ([generic isKindOfClass:[NSData class]]) {
             NSString *dataStr = [[NSString alloc] initWithData:generic encoding:NSUTF8StringEncoding];
-            if (dataStr) {
+            if (dataStr && ![dataStr hasPrefix:prefix]) {
                 NSString *prefixed = [prefix stringByAppendingString:dataStr];
                 mappedQuery[(__bridge id)kSecAttrGeneric] = [prefixed dataUsingEncoding:NSUTF8StringEncoding];
             }
@@ -89,6 +86,49 @@ NSDictionary* DKRemapKeychainQuery(NSDictionary *query) {
     }
     
     return [mappedQuery copy];
+}
+
+NSDictionary* DKRemapKeychainAttributes(NSDictionary *attributes) {
+    if (!attributes) return attributes;
+
+    DKAccountManager *manager = [DKAccountManager sharedManager];
+    NSString *currentAccount = [manager currentAccountName];
+    if ([currentAccount isEqualToString:[manager defaultAccountName]]) {
+        return attributes;
+    }
+
+    NSString *prefix = [[DKDataIsolation sharedInstance] keychainServicePrefix];
+    if (prefix.length == 0) return attributes;
+
+    NSMutableDictionary *mappedAttributes = [attributes mutableCopy];
+
+    id service = attributes[(__bridge id)kSecAttrService];
+    if (service && [service isKindOfClass:[NSString class]] && ![service hasPrefix:prefix]) {
+        mappedAttributes[(__bridge id)kSecAttrService] = [prefix stringByAppendingString:service];
+    }
+
+    id account = attributes[(__bridge id)kSecAttrAccount];
+    if (account && [account isKindOfClass:[NSString class]] && ![account hasPrefix:prefix]) {
+        mappedAttributes[(__bridge id)kSecAttrAccount] = [prefix stringByAppendingString:account];
+    }
+
+    id label = attributes[(__bridge id)kSecAttrLabel];
+    if (label && [label isKindOfClass:[NSString class]] && ![label hasPrefix:prefix]) {
+        mappedAttributes[(__bridge id)kSecAttrLabel] = [prefix stringByAppendingString:label];
+    }
+
+    id generic = attributes[(__bridge id)kSecAttrGeneric];
+    if ([generic isKindOfClass:[NSString class]] && ![generic hasPrefix:prefix]) {
+        mappedAttributes[(__bridge id)kSecAttrGeneric] = [prefix stringByAppendingString:generic];
+    } else if ([generic isKindOfClass:[NSData class]]) {
+        NSString *dataStr = [[NSString alloc] initWithData:generic encoding:NSUTF8StringEncoding];
+        if (dataStr && ![dataStr hasPrefix:prefix]) {
+            NSString *prefixed = [prefix stringByAppendingString:dataStr];
+            mappedAttributes[(__bridge id)kSecAttrGeneric] = [prefixed dataUsingEncoding:NSUTF8StringEncoding];
+        }
+    }
+
+    return [mappedAttributes copy];
 }
 
 // 反向映射：去除前缀
@@ -116,4 +156,58 @@ NSDictionary* DKUnmapKeychainResult(NSDictionary *result) {
     }
     
     return [unmappedResult copy];
+}
+
+BOOL DKKeychainResultMatchesCurrentAccount(NSDictionary *result) {
+    if (![result isKindOfClass:[NSDictionary class]]) return YES;
+
+    DKAccountManager *manager = [DKAccountManager sharedManager];
+    NSString *currentAccount = [manager currentAccountName];
+
+    NSArray *keysToCheck = @[
+        (__bridge id)kSecAttrService,
+        (__bridge id)kSecAttrAccount,
+        (__bridge id)kSecAttrLabel
+    ];
+
+    NSMutableArray<NSString *> *stringValues = [NSMutableArray array];
+    for (id key in keysToCheck) {
+        id value = result[key];
+        if ([value isKindOfClass:[NSString class]]) {
+            [stringValues addObject:value];
+        }
+    }
+
+    id generic = result[(__bridge id)kSecAttrGeneric];
+    if ([generic isKindOfClass:[NSString class]]) {
+        [stringValues addObject:generic];
+    } else if ([generic isKindOfClass:[NSData class]]) {
+        NSString *genericString = [[NSString alloc] initWithData:generic encoding:NSUTF8StringEncoding];
+        if (genericString.length > 0) {
+            [stringValues addObject:genericString];
+        }
+    }
+
+    if ([currentAccount isEqualToString:[manager defaultAccountName]]) {
+        for (NSString *value in stringValues) {
+            if ([value hasPrefix:@"DK_"]) {
+                return NO;
+            }
+        }
+        return YES;
+    }
+
+    NSString *prefix = [[DKDataIsolation sharedInstance] keychainServicePrefix];
+    if (prefix.length == 0) return YES;
+
+    // 如果返回的是纯数据而没有属性，无法判断归属，保持兼容放行。
+    if (stringValues.count == 0) return YES;
+
+    for (NSString *value in stringValues) {
+        if ([value hasPrefix:prefix]) {
+            return YES;
+        }
+    }
+
+    return NO;
 }
