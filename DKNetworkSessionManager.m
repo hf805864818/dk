@@ -124,7 +124,7 @@ static BOOL DKIsSessionRelatedDefaultsKey(NSString *key) {
             ![accountName isEqualToString:[manager defaultAccountName]]) {
             DKSessionRestoreInProgress = YES;
             @try {
-                [self _clearCurrentSessionState];
+                [self _clearCurrentSessionStateForAccount:accountName];
             } @finally {
                 DKSessionRestoreInProgress = NO;
             }
@@ -140,7 +140,10 @@ static BOOL DKIsSessionRelatedDefaultsKey(NSString *key) {
 
     @try {
         // 恢复前先清理旧登录态，避免不同账号互相污染。
-        [self _clearCurrentSessionState];
+        // 默认账号不清除原始 UserDefaults 认证键：
+        // 默认账号快照可能未捕获 TRAE 实际使用的认证键名，
+        // 预先清除会导致原始登录态被误删且无法恢复。
+        [self _clearCurrentSessionStateForAccount:accountName];
 
         // 恢复 Cookie
         NSArray *cookiesData = sessionData[@"cookies"];
@@ -377,9 +380,17 @@ static BOOL DKIsSessionRelatedDefaultsKey(NSString *key) {
     [defaults synchronize];
 }
 
-- (void)_clearCurrentSessionState {
+- (void)_clearCurrentSessionStateForAccount:(NSString *)accountName {
     [self _clearAllCookies];
-    [self _clearAuthHeaders];
+
+    DKAccountManager *manager = [DKAccountManager sharedManager];
+    if (![accountName isEqualToString:[manager defaultAccountName]]) {
+        // 非默认账号：清除认证键，避免子账号残留污染。
+        [self _clearAuthHeaders];
+    }
+    // 默认账号：只清 Cookie，保留原始 UserDefaults 认证数据。
+    // 默认账号快照可能未完整捕获应用实际使用的认证键，
+    // 若预先清除会导致原始登录态丢失且无法恢复。
 }
 
 #pragma mark - URLSession 配置管理
