@@ -920,39 +920,56 @@ didReceiveNotificationResponse:(UNNotificationResponse *)response
             }
         }
 
-        NSLog(@"[DK] 延迟安装模式：2 秒后将安装所有 Hook...");
+        NSLog(@"[DK] 立即安装模式：Hook 将在 App 初始化前全部安装完毕");
 
-        // 延迟到 App 完全启动后安装所有 Hook 和初始化模块
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        // ============================================
+        // 第一步：安装 Logos %hook（MSHookMessageEx）
+        // 必须在 App 初始化前安装，否则 App 启动时会读取原始存储
+        // 此时 _dkStartupGuard = YES，Hook 暂时透传
+        // ============================================
+        %init;
+        NSLog(@"[DK] Logos Hook 已安装");
+
+        // ============================================
+        // 第二步：安装 C 函数 Hook（fishhook rebind_symbols）
+        // 同样必须在 App 初始化前安装
+        // ============================================
+        static struct rebinding rebindings[] = {
+            // Keychain（4 个）
+            {"SecItemAdd",            hooked_SecItemAdd,            (void **)&original_SecItemAdd},
+            {"SecItemCopyMatching",   hooked_SecItemCopyMatching,   (void **)&original_SecItemCopyMatching},
+            {"SecItemUpdate",         hooked_SecItemUpdate,         (void **)&original_SecItemUpdate},
+            {"SecItemDelete",         hooked_SecItemDelete,         (void **)&original_SecItemDelete},
+            // CFPreferences（3 个）
+            {"CFPreferencesSetAppValue",    hooked_CFPreferencesSetAppValue,    (void **)&original_CFPreferencesSetAppValue},
+            {"CFPreferencesCopyAppValue",   hooked_CFPreferencesCopyAppValue,   (void **)&original_CFPreferencesCopyAppValue},
+            {"CFPreferencesAppSynchronize", hooked_CFPreferencesAppSynchronize, (void **)&original_CFPreferencesAppSynchronize},
+        };
+        rebind_symbols(rebindings, sizeof(rebindings) / sizeof(struct rebinding));
+        NSLog(@"[DK] fishhook C 函数 Hook 已安装（7 个：Keychain 4 + CFPreferences 3）");
+
+        // ============================================
+        // 第三步：恢复原始 NSUserDefaults 域
+        // Hook 已安装，_dkStartupGuard 临时设为 YES 让写入穿透
+        // ============================================
+        if (isNonDefaultAccount && savedDefaultDomain) {
+            _dkStartupGuard = YES;  // 临时透传，写入原始 NSUserDefaults
+            NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+            [defaults setPersistentDomain:savedDefaultDomain forName:bundleID];
+            [defaults synchronize];
+            _dkStartupGuard = NO;   // 重新激活 Hook 隔离
+            NSLog(@"[DK] 子账号启动：已恢复原始 NSUserDefaults（%lu 个键），Hook 已激活",
+                  (unsigned long)savedDefaultDomain.count);
+        } else {
+            _dkStartupGuard = NO;
+        }
+
+        // ============================================
+        // 第四步：初始化各模块（dispatch_async 到主线程，确保 UI 操作安全）
+        // ============================================
+        dispatch_async(dispatch_get_main_queue(), ^{
             static dispatch_once_t onceToken;
             dispatch_once(&onceToken, ^{
-                // ============================================
-                // 第一步：安装 Logos %hook（MSHookMessageEx）
-                // ============================================
-                %init;
-                NSLog(@"[DK] Logos Hook 已安装");
-
-                // ============================================
-                // 第二步：恢复原始 NSUserDefaults 域
-                // 必须在 Hook 安装后、模块初始化前执行。
-                // 此时 Hook 已生效，需临时关闭 _dkStartupGuard
-                // 让写入穿透到原始 NSUserDefaults（默认账号存储）。
-                // ============================================
-                if (isNonDefaultAccount && savedDefaultDomain) {
-                    _dkStartupGuard = YES;  // 临时透传，写入原始 NSUserDefaults
-                    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-                    [defaults setPersistentDomain:savedDefaultDomain forName:bundleID];
-                    [defaults synchronize];
-                    _dkStartupGuard = NO;   // 重新激活 Hook 隔离
-                    NSLog(@"[DK] 子账号启动：已恢复原始 NSUserDefaults（%lu 个键），Hook 已激活",
-                          (unsigned long)savedDefaultDomain.count);
-                } else {
-                    _dkStartupGuard = NO;
-                }
-
-                // ============================================
-                // 第三步：初始化各模块
-                // ============================================
                 [[DKDataIsolation sharedInstance] setup];
                 [[DKFileManagerHook sharedInstance] install];
                 [[DKUserDefaultsHook sharedInstance] install];
@@ -975,36 +992,6 @@ didReceiveNotificationResponse:(UNNotificationResponse *)response
                           [manager currentAccountName]);
                 }
 
-                // ============================================
-                // 第三步：安装 C 函数 Hook（fishhook rebind_symbols）
-                // 使用 fishhook 替代 MSHookFunction，避免 iOS 17 W^X 保护导致崩溃。
-                // fishhook 只修改 __DATA 段的 GOT/PLT 符号指针，不修改 __TEXT 代码页。
-                //
-                // 精简策略：POSIX 文件 I/O Hook (fopen/open/stat/access/openat)
-                // 已移除。ObjC 层的 %hook 块已覆盖 NSFileManager、NSData、NSString、
-                // NSDictionary、NSArray、NSFileHandle、NSKeyedArchiver 等所有文件操作 API，
-                // 足以实现完整的文件隔离。
-                // 保留 Keychain + CFPreferences Hook，因为：
-                // 1. Keychain 无 ObjC 层 Hook 覆盖，是账号隔离的核心
-                // 2. TTAccountSDK 可能通过 CFPreferences 绕过 NSUserDefaults 直接读写
-                // ============================================
-                static struct rebinding rebindings[] = {
-                    // Keychain（4 个）
-                    {"SecItemAdd",            hooked_SecItemAdd,            (void **)&original_SecItemAdd},
-                    {"SecItemCopyMatching",   hooked_SecItemCopyMatching,   (void **)&original_SecItemCopyMatching},
-                    {"SecItemUpdate",         hooked_SecItemUpdate,         (void **)&original_SecItemUpdate},
-                    {"SecItemDelete",         hooked_SecItemDelete,         (void **)&original_SecItemDelete},
-                    // CFPreferences（3 个）
-                    {"CFPreferencesSetAppValue",    hooked_CFPreferencesSetAppValue,    (void **)&original_CFPreferencesSetAppValue},
-                    {"CFPreferencesCopyAppValue",   hooked_CFPreferencesCopyAppValue,   (void **)&original_CFPreferencesCopyAppValue},
-                    {"CFPreferencesAppSynchronize", hooked_CFPreferencesAppSynchronize, (void **)&original_CFPreferencesAppSynchronize},
-                };
-                rebind_symbols(rebindings, sizeof(rebindings) / sizeof(struct rebinding));
-                NSLog(@"[DK] fishhook C 函数 Hook 已安装（7 个：Keychain 4 + CFPreferences 3）");
-
-                // ============================================
-                // 第四步：完成初始化
-                // ============================================
                 NSLog(@"[DK] ✅ 所有模块初始化完成");
             });
         });
