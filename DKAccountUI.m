@@ -481,6 +481,12 @@ static char kDKHiddenIndicatorKey;
         NSString *currentAccount = [[DKAccountManager sharedManager] currentAccountName];
         
         NSMutableArray *menuItems = [NSMutableArray arrayWithObject:@"➕ 添加账号"];
+        
+        // 添加默认账号（原始 TRAE 登录）
+        NSString *defaultDisplayName = @"📱 默认账号";
+        [menuItems addObject:defaultDisplayName];
+        
+        // 添加其他账号
         [menuItems addObjectsFromArray:accounts];
         
         BOOL filterEnabled = [DKContentFilterBypass sharedInstance].enabled;
@@ -534,9 +540,11 @@ static char kDKHiddenIndicatorKey;
         for (NSInteger i = 0; i < rowCount; i++) {
             NSString *item = menuItems[i];
             BOOL isAddAccount = (i == 0);
+            BOOL isDefaultAccount = (i == 1);
             BOOL isFilterToggle = (i == rowCount - 2);
             BOOL isHideOption = (i == rowCount - 1);
-            BOOL isCurrentAccount = [item isEqualToString:currentAccount];
+            BOOL isCurrentAccount = [item isEqualToString:currentAccount] ||
+                                    (isDefaultAccount && [currentAccount isEqualToString:[[DKAccountManager sharedManager] defaultAccountName]]);
             
             UIView *rowView = [[UIView alloc] initWithFrame:CGRectMake(0, i * kMenuRowHeight, kMenuWidth, kMenuRowHeight)];
             
@@ -655,17 +663,23 @@ static char kDKHiddenIndicatorKey;
     [self hideAccountMenu];
     
     NSArray *accounts = [[DKAccountManager sharedManager] allAccountNames];
-    NSInteger totalItems = 1 + accounts.count + 2;
+    // 0: add, 1: default, 2..N+1: accounts, N+2: filter, N+3: hide
+    NSInteger defaultAccountOffset = 1; // 默认账号在菜单中的偏移
+    NSInteger totalItems = 1 + defaultAccountOffset + accounts.count + 2;
     
     if (index == 0) {
         [self _promptAddAccount];
+    } else if (index == 1) {
+        // 切换到默认账号（原始 TRAE 登录）
+        [[DKAccountManager sharedManager] switchToDefaultAccount];
+        [self _showToast:@"已切换到默认账号"];
     } else if (index == totalItems - 1) {
         [self hideFloatingButtonAnimated:YES];
         [self _showToast:@"悬浮按钮已隐藏，三指长按可重新呼出"];
     } else if (index == totalItems - 2) {
         [self _toggleContentFilter];
     } else {
-        NSInteger accountIndex = index - 1;
+        NSInteger accountIndex = index - 2;
         if (accountIndex < accounts.count) {
             NSString *accountName = accounts[accountIndex];
             [[DKAccountManager sharedManager] switchToAccount:accountName];
@@ -678,11 +692,12 @@ static char kDKHiddenIndicatorKey;
     if (gesture.state != UIGestureRecognizerStateBegan) return;
     
     NSInteger index = gesture.view.tag;
+    // 0: add, 1: default (can't delete), 2..N+1: accounts
+    if (index <= 1) return; // 添加账号和默认账号不能删除
+    
     NSArray *accounts = [[DKAccountManager sharedManager] allAccountNames];
-    if (index - 1 < accounts.count) {
-        NSString *accountName = accounts[index - 1];
-        [self _promptDeleteAccount:accountName];
-    }
+    NSString *accountName = accounts[index - 2];
+    [self _promptDeleteAccount:accountName];
 }
 
 #pragma mark - 敏感词过滤开关

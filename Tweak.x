@@ -219,7 +219,10 @@ extern BOOL DKGetAccountUserDefaultsRecursionGuard;
 }
 
 - (void)setObject:(id)value forKey:(NSString *)defaultName {
-    if (DKGetAccountUserDefaultsRecursionGuard) { %orig; return; }
+    if (DKGetAccountUserDefaultsRecursionGuard) {
+        %orig;
+        return;
+    }
     
     DKAccountManager *manager = [DKAccountManager sharedManager];
     if (manager.isSwitching) {
@@ -243,7 +246,10 @@ extern BOOL DKGetAccountUserDefaultsRecursionGuard;
 }
 
 - (void)removeObjectForKey:(NSString *)defaultName {
-    if (DKGetAccountUserDefaultsRecursionGuard) { %orig; return; }
+    if (DKGetAccountUserDefaultsRecursionGuard) {
+        %orig;
+        return;
+    }
     
     DKAccountManager *manager = [DKAccountManager sharedManager];
     if (manager.isSwitching) {

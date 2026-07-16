@@ -241,6 +241,39 @@ static NSString *_accountsRootPath = nil;
                                                       userInfo:@{@"oldAccount": oldAccount ?: @"",
                                                                  @"newAccount": name}];
     
+    // 8. 提示用户重启应用使新账号生效
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIWindow *keyWindow = nil;
+        if (@available(iOS 13.0, *)) {
+            for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+                if (scene.activationState == UISceneActivationStateForegroundActive) {
+                    if ([scene isKindOfClass:[UIWindowScene class]]) {
+                        UIWindowScene *windowScene = (UIWindowScene *)scene;
+                        if (windowScene.windows.count > 0) {
+                            keyWindow = windowScene.windows.firstObject;
+                        }
+                    }
+                }
+            }
+        }
+        if (!keyWindow) {
+            keyWindow = [UIApplication sharedApplication].keyWindow;
+        }
+        
+        UIViewController *rootVC = keyWindow.rootViewController;
+        while (rootVC.presentedViewController) {
+            rootVC = rootVC.presentedViewController;
+        }
+        
+        if (rootVC) {
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"账号已切换"
+                                                                           message:[NSString stringWithFormat:@"已切换到账号「%@」\n请重启 TRAE 以使新账号生效", name]
+                                                                    preferredStyle:UIAlertControllerStyleAlert];
+            [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
+            [rootVC presentViewController:alert animated:YES completion:nil];
+        }
+    });
+    
     return YES;
 }
 
