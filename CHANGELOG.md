@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.0.22] - 2026-07-16
+
+- fefd6d5 fix: remove sharedUserDefaults call and protect keychain delete
+- f39effa fix: add CFPreferences hooks and default keychain backup
+
+
 ## [1.0.21] - 2026-07-16
 
 - c9846c0 fix: strengthen defaults and keychain isolation
