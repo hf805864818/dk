@@ -8,7 +8,7 @@
 // ============================================================
 // UI 常量
 // ============================================================
-static const CGFloat kFloatingButtonSize = 56.0;
+static const CGFloat kFloatingButtonSize = 40.0;
 static const CGFloat kFloatingButtonMargin = 20.0;
 static const CGFloat kMenuWidth = 220.0;
 static const CGFloat kMenuRowHeight = 48.0;
@@ -463,13 +463,19 @@ static char kDKHiddenIndicatorKey;
 #pragma mark - 账号菜单
 
 - (void)showAccountMenu {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        UIWindow *keyWindow = [self _keyWindow];
-        if (!keyWindow) return;
-        
-        [self hideAccountMenu];
-        
-        [[DKAccountManager sharedManager] refreshAccountList];
+    // 调用者已在主线程，无需 dispatch_async
+    UIWindow *keyWindow = [self _keyWindow];
+    if (!keyWindow) return;
+    
+    // 同步移除旧菜单
+    UIView *oldMenu = objc_getAssociatedObject(keyWindow, &kDKMenuViewKey);
+    if (oldMenu) {
+        [oldMenu removeFromSuperview];
+        objc_setAssociatedObject(keyWindow, &kDKMenuViewKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    self.isMenuVisible = NO;
+    
+    [[DKAccountManager sharedManager] refreshAccountList];
         
         NSArray *accounts = [[DKAccountManager sharedManager] allAccountNames];
         NSString *currentAccount = [[DKAccountManager sharedManager] currentAccountName];
@@ -607,27 +613,24 @@ static char kDKHiddenIndicatorKey;
         } completion:nil];
         
         self.isMenuVisible = YES;
-    });
 }
 
 - (void)hideAccountMenu {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        UIWindow *keyWindow = [self _keyWindow];
-        if (!keyWindow) return;
-        
-        UIView *menuView = objc_getAssociatedObject(keyWindow, &kDKMenuViewKey);
-        if (menuView) {
-            [UIView animateWithDuration:0.2 animations:^{
-                menuView.transform = CGAffineTransformMakeScale(0.8, 0.8);
-                menuView.alpha = 0;
-            } completion:^(BOOL finished) {
-                [menuView removeFromSuperview];
-            }];
-            objc_setAssociatedObject(keyWindow, &kDKMenuViewKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        }
-        
-        self.isMenuVisible = NO;
-    });
+    UIWindow *keyWindow = [self _keyWindow];
+    if (!keyWindow) return;
+    
+    UIView *menuView = objc_getAssociatedObject(keyWindow, &kDKMenuViewKey);
+    if (menuView) {
+        [UIView animateWithDuration:0.2 animations:^{
+            menuView.transform = CGAffineTransformMakeScale(0.8, 0.8);
+            menuView.alpha = 0;
+        } completion:^(BOOL finished) {
+            [menuView removeFromSuperview];
+        }];
+        objc_setAssociatedObject(keyWindow, &kDKMenuViewKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    
+    self.isMenuVisible = NO;
 }
 
 - (void)refreshMenu {
@@ -640,11 +643,9 @@ static char kDKHiddenIndicatorKey;
 }
 
 - (void)cleanup {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [self hideFloatingButton];
-        [self hideAccountMenu];
-        [self _hideHiddenIndicator];
-    });
+    [self hideFloatingButton];
+    [self hideAccountMenu];
+    [self _hideHiddenIndicator];
 }
 
 #pragma mark - 菜单项交互
