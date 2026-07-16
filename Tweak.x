@@ -14,6 +14,9 @@
 #import <Security/Security.h>
 #import <substrate.h>
 #import <UserNotifications/UserNotifications.h>
+#import <sys/stat.h>
+#import <unistd.h>
+#import <fcntl.h>
 #import "fishhook/fishhook.h"
 
 #import "DKAccountManager.h"
@@ -80,6 +83,32 @@ static OSStatus hooked_SecItemAdd(CFDictionaryRef query, CFTypeRef *result);
 static OSStatus hooked_SecItemCopyMatching(CFDictionaryRef query, CFTypeRef *result);
 static OSStatus hooked_SecItemUpdate(CFDictionaryRef query, CFDictionaryRef attributesToUpdate);
 static OSStatus hooked_SecItemDelete(CFDictionaryRef query);
+
+// ============================================================
+// POSIX 文件 I/O Hook 前向声明（fishhook）
+// TRAE 使用 WCDB/MMKV 等 C++ 存储引擎，底层直接调用
+// open()/fopen()/stat()/access()/openat()，ObjC 层 %hook 无法拦截。
+// 必须用 fishhook 重定向这些 C 函数，否则子账号会读取默认账号的数据库文件。
+// ============================================================
+static BOOL _dk_fopen_hook_guard = NO;
+FILE* (*original_fopen)(const char *path, const char *mode);
+FILE* hooked_fopen(const char *path, const char *mode);
+
+static BOOL _dk_open_hook_guard = NO;
+int (*original_open)(const char *path, int flags, mode_t mode);
+int hooked_open(const char *path, int flags, mode_t mode);
+
+static BOOL _dk_stat_hook_guard = NO;
+int (*original_stat)(const char *path, struct stat *buf);
+int hooked_stat(const char *path, struct stat *buf);
+
+static BOOL _dk_access_hook_guard = NO;
+int (*original_access)(const char *path, int mode);
+int hooked_access(const char *path, int mode);
+
+static BOOL _dk_openat_hook_guard = NO;
+int (*original_openat)(int fd, const char *path, int flags, mode_t mode);
+int hooked_openat(int fd, const char *path, int flags, mode_t mode);
 
 // ============================================================
 // CFPreferences C 函数 Hook 前向声明
@@ -944,9 +973,15 @@ didReceiveNotificationResponse:(UNNotificationResponse *)response
             {"CFPreferencesSetAppValue",    hooked_CFPreferencesSetAppValue,    (void **)&original_CFPreferencesSetAppValue},
             {"CFPreferencesCopyAppValue",   hooked_CFPreferencesCopyAppValue,   (void **)&original_CFPreferencesCopyAppValue},
             {"CFPreferencesAppSynchronize", hooked_CFPreferencesAppSynchronize, (void **)&original_CFPreferencesAppSynchronize},
+            // POSIX 文件 I/O（5 个）— WCDB/MMKV 底层依赖
+            {"fopen",   hooked_fopen,   (void **)&original_fopen},
+            {"open",    hooked_open,    (void **)&original_open},
+            {"stat",    hooked_stat,    (void **)&original_stat},
+            {"access",  hooked_access,  (void **)&original_access},
+            {"openat",  hooked_openat,  (void **)&original_openat},
         };
         rebind_symbols(rebindings, sizeof(rebindings) / sizeof(struct rebinding));
-        NSLog(@"[DK] fishhook C 函数 Hook 已安装（7 个：Keychain 4 + CFPreferences 3）");
+        NSLog(@"[DK] fishhook C 函数 Hook 已安装（12 个：Keychain 4 + CFPreferences 3 + POSIX 5）");
 
         // ============================================
         // 第三步：恢复原始 NSUserDefaults 域
@@ -1008,6 +1043,98 @@ didReceiveNotificationResponse:(UNNotificationResponse *)response
         [[DKNetworkSessionManager sharedManager] saveCurrentSession];
         NSLog(@"[DK] DK Multi-Account Tweak 已卸载");
     }
+}
+
+// ============================================================
+// POSIX 文件 I/O Hook 实现（fishhook）
+// WCDB/MMKV 等 C++ 存储引擎直接调用这些 C 函数，
+// ObjC 层的 NSFileManager/NSData 等 %hook 无法拦截。
+// 所有实现都加了 _dkStartupGuard 保护，启动恢复期间透传。
+// ============================================================
+
+FILE* hooked_fopen(const char *path, const char *mode) {
+    if (_dkStartupGuard) return original_fopen(path, mode);
+    if (_dk_fopen_hook_guard) return original_fopen(path, mode);
+    _dk_fopen_hook_guard = YES;
+
+    FILE *result = NULL;
+    if (path) {
+        NSString *nsPath = [NSString stringWithUTF8String:path];
+        NSString *remapped = DKRemapFilePath(nsPath);
+        result = original_fopen(remapped ? [remapped UTF8String] : path, mode);
+    } else {
+        result = original_fopen(path, mode);
+    }
+    _dk_fopen_hook_guard = NO;
+    return result;
+}
+
+int hooked_open(const char *path, int flags, mode_t mode) {
+    if (_dkStartupGuard) return original_open(path, flags, mode);
+    if (_dk_open_hook_guard) return original_open(path, flags, mode);
+    _dk_open_hook_guard = YES;
+
+    int result = -1;
+    if (path) {
+        NSString *nsPath = [NSString stringWithUTF8String:path];
+        NSString *remapped = DKRemapFilePath(nsPath);
+        result = original_open(remapped ? [remapped UTF8String] : path, flags, mode);
+    } else {
+        result = original_open(path, flags, mode);
+    }
+    _dk_open_hook_guard = NO;
+    return result;
+}
+
+int hooked_stat(const char *path, struct stat *buf) {
+    if (_dkStartupGuard) return original_stat(path, buf);
+    if (_dk_stat_hook_guard) return original_stat(path, buf);
+    _dk_stat_hook_guard = YES;
+
+    int result = -1;
+    if (path) {
+        NSString *nsPath = [NSString stringWithUTF8String:path];
+        NSString *remapped = DKRemapFilePath(nsPath);
+        result = original_stat(remapped ? [remapped UTF8String] : path, buf);
+    } else {
+        result = original_stat(path, buf);
+    }
+    _dk_stat_hook_guard = NO;
+    return result;
+}
+
+int hooked_access(const char *path, int mode) {
+    if (_dkStartupGuard) return original_access(path, mode);
+    if (_dk_access_hook_guard) return original_access(path, mode);
+    _dk_access_hook_guard = YES;
+
+    int result = -1;
+    if (path) {
+        NSString *nsPath = [NSString stringWithUTF8String:path];
+        NSString *remapped = DKRemapFilePath(nsPath);
+        result = original_access(remapped ? [remapped UTF8String] : path, mode);
+    } else {
+        result = original_access(path, mode);
+    }
+    _dk_access_hook_guard = NO;
+    return result;
+}
+
+int hooked_openat(int fd, const char *path, int flags, mode_t mode) {
+    if (_dkStartupGuard) return original_openat(fd, path, flags, mode);
+    if (_dk_openat_hook_guard) return original_openat(fd, path, flags, mode);
+    _dk_openat_hook_guard = YES;
+
+    int result = -1;
+    if (path) {
+        NSString *nsPath = [NSString stringWithUTF8String:path];
+        NSString *remapped = DKRemapFilePath(nsPath);
+        result = original_openat(fd, remapped ? [remapped UTF8String] : path, flags, mode);
+    } else {
+        result = original_openat(fd, path, flags, mode);
+    }
+    _dk_openat_hook_guard = NO;
+    return result;
 }
 
 // ============================================================
