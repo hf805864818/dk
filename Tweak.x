@@ -100,6 +100,8 @@ static OSStatus hooked_SecItemDelete(CFDictionaryRef query);
         // 启动会话定期刷新
         [[DKNetworkSessionManager sharedManager] scheduleSessionRefresh];
         
+        NSLog(@"[DK] ✅ 所有模块初始化完成，等待手势安装...");
+        
         // 安装 Keychain C 函数 Hook
         MSHookFunction((void *)SecItemAdd, (void *)hooked_SecItemAdd, (void **)&original_SecItemAdd);
         MSHookFunction((void *)SecItemCopyMatching, (void *)hooked_SecItemCopyMatching, (void **)&original_SecItemCopyMatching);
