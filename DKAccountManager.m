@@ -152,18 +152,10 @@ static NSString *_accountsRootPath = nil;
                             error:nil];
     }
     
-    // 复制原始 NSUserDefaults 到账号的独立 plist（让新账号有基础数据）
-    NSString *accountPlistPath = [accountPath stringByAppendingPathComponent:@"Library/Preferences/dk_defaults.plist"];
-    NSDictionary *originalDefaults = [[NSUserDefaults standardUserDefaults] dictionaryRepresentation];
-    // 排除 DK 内部键
-    NSMutableDictionary *filteredDefaults = [NSMutableDictionary dictionary];
-    for (NSString *key in originalDefaults) {
-        if (![key hasPrefix:@"DK_"]) {
-            filteredDefaults[key] = originalDefaults[key];
-        }
-    }
-    [filteredDefaults writeToFile:accountPlistPath atomically:YES];
-    NSLog(@"[DK] 已复制 %lu 个 NSUserDefaults 键值到账号 %@", (unsigned long)filteredDefaults.count, name);
+    // 注意：不复制原始 NSUserDefaults
+    // 新账号的独立 plist 保持为空，登录态/配置全从零开始
+    // 这样切换账号后 app 找不到登录态，自然显示登录页
+    NSLog(@"[DK] 账号 %@ 的 NSUserDefaults 已留空（全新开始）", name);
     
     // 保存元数据
     NSDictionary *metadata = @{

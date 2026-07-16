@@ -14,6 +14,9 @@
 #import <Security/Security.h>
 #import <substrate.h>
 #import <UserNotifications/UserNotifications.h>
+#import <sys/stat.h>
+#import <unistd.h>
+#import <fcntl.h>
 
 #import "DKAccountManager.h"
 #import "DKAccountUI.h"
@@ -711,9 +714,15 @@ didReceiveNotificationResponse:(UNNotificationResponse *)response
         MSHookFunction((void *)SecItemDelete, (void *)hooked_SecItemDelete, (void **)&original_SecItemDelete);
         NSLog(@"[DK] Keychain Hook 已安装");
         
-        // 安装 POSIX 文件 I/O Hook（捕获 Flutter dart:io 的 fopen 调用）
+        // 安装 POSIX 文件 I/O Hook（捕获 Flutter dart:io 的底层调用）
         MSHookFunction((void *)fopen, (void *)hooked_fopen, (void **)&original_fopen);
         NSLog(@"[DK] POSIX fopen Hook 已安装");
+        MSHookFunction((void *)open, (void *)hooked_open, (void **)&original_open);
+        NSLog(@"[DK] POSIX open Hook 已安装");
+        MSHookFunction((void *)stat, (void *)hooked_stat, (void **)&original_stat);
+        NSLog(@"[DK] POSIX stat Hook 已安装");
+        MSHookFunction((void *)access, (void *)hooked_access, (void **)&original_access);
+        NSLog(@"[DK] POSIX access Hook 已安装");
         
         // 延迟启动 UI 层敏感词过滤绕过（等应用完全启动后）
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
@@ -808,6 +817,18 @@ static BOOL _dk_fopen_hook_guard = NO;
 
 FILE* (*original_fopen)(const char *path, const char *mode);
 
+// POSIX open() — Flutter dart:io 二进制文件读写使用此函数
+static BOOL _dk_open_hook_guard = NO;
+int (*original_open)(const char *path, int flags, mode_t mode);
+
+// POSIX stat() — Flutter dart:io 文件存在性检查使用此函数
+static BOOL _dk_stat_hook_guard = NO;
+int (*original_stat)(const char *path, struct stat *buf);
+
+// POSIX access() — Flutter dart:io 文件可访问性检查使用此函数
+static BOOL _dk_access_hook_guard = NO;
+int (*original_access)(const char *path, int mode);
+
 FILE* hooked_fopen(const char *path, const char *mode) {
     // 递归保护：如果已经在 hooked_fopen 中，直接走原始实现
     if (_dk_fopen_hook_guard) {
@@ -831,5 +852,100 @@ FILE* hooked_fopen(const char *path, const char *mode) {
     }
     
     _dk_fopen_hook_guard = NO;
+    return result;
+}
+
+// ============================================================
+// POSIX open() Hook — 捕获 Flutter dart:io 的二进制文件 I/O
+// Flutter 的 File.readAsBytes() / File.writeAsBytes() / RandomAccessFile
+// 使用 open() 而非 fopen()。这是 dart:io 最核心的文件操作函数。
+// ============================================================
+
+int hooked_open(const char *path, int flags, mode_t mode) {
+    // 递归保护
+    if (_dk_open_hook_guard) {
+        return original_open(path, flags, mode);
+    }
+    
+    _dk_open_hook_guard = YES;
+    
+    int result = -1;
+    if (path) {
+        NSString *nsPath = [NSString stringWithUTF8String:path];
+        NSString *remapped = DKRemapFilePath(nsPath);
+        if (remapped && remapped != nsPath) {
+            const char *newPath = [remapped UTF8String];
+            result = original_open(newPath, flags, mode);
+        } else {
+            result = original_open(path, flags, mode);
+        }
+    } else {
+        result = original_open(path, flags, mode);
+    }
+    
+    _dk_open_hook_guard = NO;
+    return result;
+}
+
+// ============================================================
+// POSIX stat() Hook — 捕获 Flutter dart:io 的文件存在性/元数据查询
+// Flutter 的 File.exists() / File.stat() / Directory.exists()
+// 使用 stat() 检查文件是否存在和获取元数据。
+// ============================================================
+
+int hooked_stat(const char *path, struct stat *buf) {
+    // 递归保护
+    if (_dk_stat_hook_guard) {
+        return original_stat(path, buf);
+    }
+    
+    _dk_stat_hook_guard = YES;
+    
+    int result = -1;
+    if (path) {
+        NSString *nsPath = [NSString stringWithUTF8String:path];
+        NSString *remapped = DKRemapFilePath(nsPath);
+        if (remapped && remapped != nsPath) {
+            const char *newPath = [remapped UTF8String];
+            result = original_stat(newPath, buf);
+        } else {
+            result = original_stat(path, buf);
+        }
+    } else {
+        result = original_stat(path, buf);
+    }
+    
+    _dk_stat_hook_guard = NO;
+    return result;
+}
+
+// ============================================================
+// POSIX access() Hook — 捕获 Flutter dart:io 的文件可访问性检查
+// Flutter 的某些文件操作使用 access() 检查文件是否存在。
+// ============================================================
+
+int hooked_access(const char *path, int mode) {
+    // 递归保护
+    if (_dk_access_hook_guard) {
+        return original_access(path, mode);
+    }
+    
+    _dk_access_hook_guard = YES;
+    
+    int result = -1;
+    if (path) {
+        NSString *nsPath = [NSString stringWithUTF8String:path];
+        NSString *remapped = DKRemapFilePath(nsPath);
+        if (remapped && remapped != nsPath) {
+            const char *newPath = [remapped UTF8String];
+            result = original_access(newPath, mode);
+        } else {
+            result = original_access(path, mode);
+        }
+    } else {
+        result = original_access(path, mode);
+    }
+    
+    _dk_access_hook_guard = NO;
     return result;
 }
