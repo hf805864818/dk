@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.0.18] - 2026-07-16
+
+- 38b665e feat: add multi-account data cleanup
+
+
 ## [1.0.17] - 2026-07-16
 
 - 94b9a7e fix: clear stale auth state when switching accounts
