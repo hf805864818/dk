@@ -192,9 +192,9 @@ static char kDKHiddenIndicatorKey;
 #pragma mark - 摇晃检测（备用触发）
 
 - (void)_setupShakeDetection {
-    // 通过监听 motion 事件实现摇晃检测
-    // 注意：这需要应用本身支持摇晃，否则需要在 UIWindow 上拦截
-    NSLog(@"[DK] 摇晃检测已设置（需要应用支持 motion 事件）");
+    // 摇晃检测已实现在 Tweak.x 的 UIApplication sendEvent: Hook 中。
+    // 此处保留方法体以兼容旧代码，实际摇晃拦截不在此文件。
+    NSLog(@"[DK] 摇晃检测已就绪（通过 UIApplication sendEvent: 拦截）");
 }
 
 - (void)_deviceDidShake:(NSNotification *)notification {
@@ -202,7 +202,7 @@ static char kDKHiddenIndicatorKey;
     [self showFloatingButton];
 }
 
-// 公开方法：外部调用触发（可通过Activator等工具绑定）
+// 公开方法：外部调用触发（可通过 Activator 等工具绑定，或由 sendEvent: Hook 触发）
 - (void)triggerShowFloatingButton {
     NSLog(@"[DK] 外部触发显示悬浮按钮");
     [self showFloatingButton];

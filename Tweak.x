@@ -708,6 +708,26 @@ fetchCompletionHandler:(void (^)(UIBackgroundFetchResult))completionHandler {
     %orig;
 }
 
+// ============================================================
+// 摇晃检测 - 通过 sendEvent: 拦截运动事件
+// 这是最可靠的摇晃检测方式：sendEvent: 接收所有分发的事件，
+// 不依赖 responder chain 中某个对象实现了 motionEnded:。
+// ============================================================
+- (void)sendEvent:(UIEvent *)event {
+    %orig;
+
+    if (event.type == UIEventTypeMotion && event.subtype == UIEventSubtypeMotionShake) {
+        static NSTimeInterval lastShakeTime = 0;
+        NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
+        // 防抖：1 秒内只响应一次
+        if (now - lastShakeTime > 1.0) {
+            lastShakeTime = now;
+            NSLog(@"[DK] 🔥 检测到摇晃！");
+            [[DKAccountUI sharedInstance] triggerShowFloatingButton];
+        }
+    }
+}
+
 %end
 
 // ============================================================
