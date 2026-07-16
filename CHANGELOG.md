@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.0.26] - 2026-07-16
+
+- f1a1cef fix: 修复注入插件后App启动闪退 - 延迟安装所有Hook
+
+
 ## [1.0.23] - 2026-07-16
 
 - f1ec95f fix: full defaults domain snapshot and multi-class keychain backup
