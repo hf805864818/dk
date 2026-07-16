@@ -1,6 +1,7 @@
 #import "DKNetworkSessionManager.h"
 #import "DKAccountManager.h"
 #import <Foundation/Foundation.h>
+#import <UIKit/UIKit.h>
 
 // ============================================================
 // DKNetworkSessionManager
