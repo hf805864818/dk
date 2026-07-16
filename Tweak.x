@@ -62,6 +62,11 @@ NSString* DKGetBuildTime(void) {
 // ============================================================
 // Keychain C 函数 Hook 前向声明（定义在文件后面）
 // ============================================================
+static OSStatus (*original_SecItemAdd)(CFDictionaryRef query, CFTypeRef *result);
+static OSStatus (*original_SecItemCopyMatching)(CFDictionaryRef query, CFTypeRef *result);
+static OSStatus (*original_SecItemUpdate)(CFDictionaryRef query, CFDictionaryRef attributesToUpdate);
+static OSStatus (*original_SecItemDelete)(CFDictionaryRef query);
+
 static OSStatus hooked_SecItemAdd(CFDictionaryRef query, CFTypeRef *result);
 static OSStatus hooked_SecItemCopyMatching(CFDictionaryRef query, CFTypeRef *result);
 static OSStatus hooked_SecItemUpdate(CFDictionaryRef query, CFDictionaryRef attributesToUpdate);
@@ -329,11 +334,6 @@ static OSStatus hooked_SecItemDelete(CFDictionaryRef query);
 // 通过给 service/account 添加前缀实现每个账号的独立 Keychain
 // 使用 MSHookFunction 直接 Hook C 函数
 // ============================================================
-
-static OSStatus (*original_SecItemAdd)(CFDictionaryRef query, CFTypeRef *result);
-static OSStatus (*original_SecItemCopyMatching)(CFDictionaryRef query, CFTypeRef *result);
-static OSStatus (*original_SecItemUpdate)(CFDictionaryRef query, CFDictionaryRef attributesToUpdate);
-static OSStatus (*original_SecItemDelete)(CFDictionaryRef query);
 
 static OSStatus hooked_SecItemAdd(CFDictionaryRef query, CFTypeRef *result) {
     NSDictionary *nsQuery = (__bridge NSDictionary *)query;
