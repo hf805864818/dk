@@ -2,7 +2,6 @@
     Filter = {
         Bundles = (
             "com.stone.solo.cn",
-            "com.apple.AppStore",
         );
     };
     DKConfig = {

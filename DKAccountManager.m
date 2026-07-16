@@ -71,19 +71,28 @@ static NSString *_accountsRootPath = nil;
 - (void)_saveCurrentAccountToFile:(NSString *)accountName {
     NSString *path = [self _currentAccountFilePath];
     // 直接写入文件系统，不依赖 NSUserDefaults/cfprefsd，避免 exit(0) 前同步延迟丢失
+    NSLog(@"[DK] 写入当前账号文件: %@ -> %@", accountName, path);
     NSError *error = nil;
-    [accountName writeToFile:path
+    BOOL ok = [accountName writeToFile:path
                   atomically:YES
                     encoding:NSUTF8StringEncoding
                        error:&error];
-    if (error) {
-        NSLog(@"[DK] 当前账号文件写入失败: %@", error);
+    if (!ok || error) {
+        NSLog(@"[DK] ❌ 当前账号文件写入失败: %@ (path=%@)", error, path);
+    } else {
+        // 验证写入内容
+        NSString *verify = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
+        NSLog(@"[DK] ✅ 当前账号文件写入成功，验证读取: %@", verify);
     }
 }
 
 - (NSString *)_currentAccountFromFile {
     NSString *path = [self _currentAccountFilePath];
-    if (![[NSFileManager defaultManager] fileExistsAtPath:path]) return nil;
+    NSLog(@"[DK] 读取当前账号文件: %@", path);
+    if (![[NSFileManager defaultManager] fileExistsAtPath:path]) {
+        NSLog(@"[DK] 当前账号文件不存在: %@", path);
+        return nil;
+    }
     NSError *error = nil;
     NSString *saved = [NSString stringWithContentsOfFile:path
                                                 encoding:NSUTF8StringEncoding
@@ -91,6 +100,7 @@ static NSString *_accountsRootPath = nil;
     if (error) {
         NSLog(@"[DK] 当前账号文件读取失败: %@", error);
     }
+    NSLog(@"[DK] 当前账号文件内容: %@", saved);
     return saved;
 }
 
@@ -122,12 +132,16 @@ static NSString *_accountsRootPath = nil;
 
 - (void)refreshAccountList {
     [_accountNames removeAllObjects];
-    
+
     NSFileManager *fm = [NSFileManager defaultManager];
-    NSArray *contents = [fm contentsOfDirectoryAtPath:self.accountsRootPath error:nil];
-    
+    NSString *rootPath = self.accountsRootPath;
+    NSLog(@"[DK] refreshAccountList: 根目录=%@", rootPath);
+
+    NSArray *contents = [fm contentsOfDirectoryAtPath:rootPath error:nil];
+    NSLog(@"[DK] refreshAccountList: 目录内容=%lu 项", (unsigned long)contents.count);
+
     for (NSString *item in contents) {
-        NSString *fullPath = [self.accountsRootPath stringByAppendingPathComponent:item];
+        NSString *fullPath = [rootPath stringByAppendingPathComponent:item];
         BOOL isDir = NO;
         if ([fm fileExistsAtPath:fullPath isDirectory:&isDir] && isDir) {
             // 检查是否有元数据文件
@@ -138,10 +152,11 @@ static NSString *_accountsRootPath = nil;
                 if (meta) {
                     _metadataCache[item] = meta;
                 }
+                NSLog(@"[DK] refreshAccountList: 发现账号 %@", item);
             }
         }
     }
-    
+
     // 重要：先临时设为默认账号，这样 NSUserDefaults Hook 的 objectForKey 走 %orig，
     // 读取原始 NSUserDefaults（而非某个账号的独立 plist），确保读到正确的保存状态
     _currentAccountName = kDKDefaultAccountName;
@@ -151,7 +166,9 @@ static NSString *_accountsRootPath = nil;
     NSString *saved = [self _currentAccountFromFile];
     if (!saved) {
         // 兼容旧版本：回退到 NSUserDefaults
+        NSLog(@"[DK] refreshAccountList: 文件未读到，回退到 NSUserDefaults");
         saved = [[NSUserDefaults standardUserDefaults] stringForKey:kDKCurrentAccountKey];
+        NSLog(@"[DK] refreshAccountList: NSUserDefaults 值=%@", saved);
     }
 
     if (saved) {
@@ -166,6 +183,7 @@ static NSString *_accountsRootPath = nil;
     } else {
         _currentAccountName = _accountNames.count > 0 ? _accountNames.firstObject : kDKDefaultAccountName;
     }
+    NSLog(@"[DK] refreshAccountList: 最终当前账号=%@", _currentAccountName);
 }
 
 - (BOOL)addAccountWithName:(NSString *)name {

@@ -920,7 +920,9 @@ int hooked_openat(int fd, const char *path, int flags, mode_t mode);
         NSString *defaultAccount = [[DKAccountManager sharedManager] defaultAccountName];
         BOOL isNonDefaultAccount = ![currentAccount isEqualToString:defaultAccount];
 
-        NSLog(@"[DK] 当前账号: %@ (非默认: %@)", currentAccount, isNonDefaultAccount ? @"YES" : @"NO");
+        NSLog(@"[DK] BundleID=%@, 当前账号=%@, 非默认=%@, accountsRoot=%@",
+              bundleID, currentAccount, isNonDefaultAccount ? @"YES" : @"NO",
+              [[DKAccountManager sharedManager] accountsRootPath]);
 
         // 用于在 Hook 安装后恢复原始 NSUserDefaults 的数据
         __block NSDictionary *savedDefaultDomain = nil;
