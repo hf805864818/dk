@@ -49,15 +49,15 @@ static NSString *const kDKNotificationCategoryID = @"DK_ACCOUNT_MSG";
     if (@available(iOS 10.0, *)) {
         UNNotificationAction *viewAction = [UNNotificationAction actionWithIdentifier:@"DK_VIEW"
                                                                                 title:@"查看"
-                                                                              options:UNNotificationActionForeground];
+                                                                              options:UNNotificationActionOptionForeground];
         
         UNNotificationAction *switchAction = [UNNotificationAction actionWithIdentifier:@"DK_SWITCH"
                                                                                   title:@"切换到此账号"
-                                                                                options:UNNotificationActionForeground];
+                                                                                options:UNNotificationActionOptionForeground];
         
         UNNotificationAction *dismissAction = [UNNotificationAction actionWithIdentifier:@"DK_DISMISS"
                                                                                    title:@"忽略"
-                                                                                 options:UNNotificationActionDestructive];
+                                                                                 options:UNNotificationActionOptionDestructive];
         
         UNNotificationCategory *category = [UNNotificationCategory categoryWithIdentifier:kDKNotificationCategoryID
                                                                                   actions:@[viewAction, switchAction, dismissAction]
