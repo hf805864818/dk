@@ -892,17 +892,56 @@ int hooked_openat(int fd, const char *path, int flags, mode_t mode);
 // 解决方案：延迟 2 秒到 App 完全启动后再安装所有 Hook。
 // 此时 TRAE 的 dispatch_once 初始化已全部完成，Hook 不会
 // 干扰任何关键启动流程。
+//
+// 子账号启动处理：
+// 如果上次退出前已切换到子账号（B/C/D），%ctor 阶段立即调用
+// refreshAccountList 确定当前账号。若为子账号，保存并清空
+// 原始 NSUserDefaults 域，App 启动时看不到默认账号登录数据，
+// 自然显示登录页。Hook 安装后再恢复原始域到默认账号存储。
 // ============================================================
 %ctor {
     @autoreleasepool {
         NSString *bundleID = DKGetCurrentBundleID();
 
         NSLog(@"========================================");
-        NSLog(@"[DK] DK Multi-Account Tweak v1.0.25%@ 已加载", DK_VERSION);
+        NSLog(@"[DK] DK Multi-Account Tweak v%@ 已加载", DK_VERSION);
         NSLog(@"[DK] 构建时间: %@", DK_BUILD_TIME);
         NSLog(@"[DK] 当前应用: %@", bundleID);
-        NSLog(@"[DK] 延迟安装模式：2 秒后将安装所有 Hook...");
         NSLog(@"========================================");
+
+        // ============================================
+        // 关键：立即确定当前账号，不能等到 Hook 安装后。
+        // 如果上次退出前已切换到子账号（B/C/D），
+        // 必须在 App 初始化前清空原始 NSUserDefaults，
+        // 否则 App 会读取到默认账号的登录态并显示主页面。
+        // ============================================
+        [[DKAccountManager sharedManager] refreshAccountList];
+        NSString *currentAccount = [[DKAccountManager sharedManager] currentAccountName];
+        NSString *defaultAccount = [[DKAccountManager sharedManager] defaultAccountName];
+        BOOL isNonDefaultAccount = ![currentAccount isEqualToString:defaultAccount];
+
+        NSLog(@"[DK] 当前账号: %@ (非默认: %@)", currentAccount, isNonDefaultAccount ? @"YES" : @"NO");
+
+        // 用于在 Hook 安装后恢复原始 NSUserDefaults 的数据
+        __block NSDictionary *savedDefaultDomain = nil;
+
+        if (isNonDefaultAccount) {
+            // 保存完整的原始 NSUserDefaults 域（包含默认账号的登录态等所有数据）
+            NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+            savedDefaultDomain = [defaults persistentDomainForName:bundleID];
+
+            if (savedDefaultDomain) {
+                // 清空原始域 — 内存 + 磁盘 plist 全部清除
+                [defaults removePersistentDomainForName:bundleID];
+                [defaults synchronize];
+                NSLog(@"[DK] 子账号启动：已清空原始 NSUserDefaults（%lu 个键），App 将显示登录页",
+                      (unsigned long)savedDefaultDomain.count);
+            } else {
+                NSLog(@"[DK] 子账号启动：原始 NSUserDefaults 域为空，无需清空");
+            }
+        }
+
+        NSLog(@"[DK] 延迟安装模式：2 秒后将安装所有 Hook...");
 
         // 延迟到 App 完全启动后安装所有 Hook 和初始化模块
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
@@ -915,9 +954,26 @@ int hooked_openat(int fd, const char *path, int flags, mode_t mode);
                 NSLog(@"[DK] Logos Hook 已安装");
 
                 // ============================================
-                // 第二步：初始化各模块
+                // 第二步：恢复原始 NSUserDefaults 域
+                // 必须在 Hook 安装后、模块初始化前执行。
+                // 此时 Hook 已生效，需临时关闭 _dkStartupGuard
+                // 让写入穿透到原始 NSUserDefaults（默认账号存储）。
                 // ============================================
-                [[DKAccountManager sharedManager] refreshAccountList];
+                if (isNonDefaultAccount && savedDefaultDomain) {
+                    _dkStartupGuard = YES;  // 临时透传，写入原始 NSUserDefaults
+                    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+                    [defaults setPersistentDomain:savedDefaultDomain forName:bundleID];
+                    [defaults synchronize];
+                    _dkStartupGuard = NO;   // 重新激活 Hook 隔离
+                    NSLog(@"[DK] 子账号启动：已恢复原始 NSUserDefaults（%lu 个键），Hook 已激活",
+                          (unsigned long)savedDefaultDomain.count);
+                } else {
+                    _dkStartupGuard = NO;
+                }
+
+                // ============================================
+                // 第三步：初始化各模块
+                // ============================================
                 [[DKDataIsolation sharedInstance] setup];
                 [[DKFileManagerHook sharedInstance] install];
                 [[DKUserDefaultsHook sharedInstance] install];
@@ -965,11 +1021,9 @@ int hooked_openat(int fd, const char *path, int flags, mode_t mode);
                 NSLog(@"[DK] POSIX Hook 已安装");
 
                 // ============================================
-                // 第四步：解除启动保护，激活账号隔离
+                // 第四步：完成初始化
                 // ============================================
-                _dkStartupGuard = NO;
-                NSLog(@"[DK] ✅ 启动保护期结束，账号隔离已激活");
-                NSLog(@"[DK] 所有模块初始化完成");
+                NSLog(@"[DK] ✅ 所有模块初始化完成");
             });
         });
     }
