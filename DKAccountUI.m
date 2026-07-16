@@ -492,7 +492,8 @@ static char kDKHiddenIndicatorKey;
         BOOL filterEnabled = [DKContentFilterBypass sharedInstance].enabled;
         NSString *filterLabel = filterEnabled ? @"🔒 敏感词过滤: 开" : @"🔓 敏感词过滤: 关";
         [menuItems addObject:filterLabel];
-        
+
+        [menuItems addObject:@"🧹 清理多开数据"];
         [menuItems addObject:@"👁 隐藏图标"];
         
         NSInteger rowCount = menuItems.count;
@@ -541,7 +542,8 @@ static char kDKHiddenIndicatorKey;
             NSString *item = menuItems[i];
             BOOL isAddAccount = (i == 0);
             BOOL isDefaultAccount = (i == 1);
-            BOOL isFilterToggle = (i == rowCount - 2);
+            BOOL isFilterToggle = (i == rowCount - 3);
+            BOOL isClearData = (i == rowCount - 2);
             BOOL isHideOption = (i == rowCount - 1);
             BOOL isCurrentAccount = [item isEqualToString:currentAccount] ||
                                     (isDefaultAccount && [currentAccount isEqualToString:[[DKAccountManager sharedManager] defaultAccountName]]);
@@ -558,6 +560,7 @@ static char kDKHiddenIndicatorKey;
             label.text = item;
             label.textColor = isAddAccount ? [UIColor colorWithRed:0.3 green:0.7 blue:1.0 alpha:1.0] :
                               isHideOption ? [UIColor colorWithWhite:0.6 alpha:1.0] :
+                              isClearData ? [UIColor colorWithRed:1.0 green:0.35 blue:0.25 alpha:1.0] :
                               isFilterToggle ? [UIColor colorWithRed:1.0 green:0.75 blue:0.3 alpha:1.0] :
                               [UIColor whiteColor];
             label.font = [UIFont systemFontOfSize:15];
@@ -566,14 +569,14 @@ static char kDKHiddenIndicatorKey;
                 label.font = [UIFont boldSystemFontOfSize:15];
             }
             
-            if (isCurrentAccount && !isAddAccount && !isHideOption && !isFilterToggle) {
+            if (isCurrentAccount && !isAddAccount && !isHideOption && !isFilterToggle && !isClearData) {
                 label.text = [NSString stringWithFormat:@"✓ %@", item];
                 label.textColor = [UIColor colorWithRed:0.3 green:0.9 blue:0.5 alpha:1.0];
             }
             
             [rowView addSubview:label];
             
-            if (!isAddAccount && !isHideOption && !isFilterToggle) {
+            if (!isAddAccount && !isHideOption && !isFilterToggle && !isClearData) {
                 NSInteger unread = [[DKPushNotificationBridge sharedInstance] unreadCountForAccount:item];
                 if (unread > 0) {
                     UILabel *badge = [[UILabel alloc] initWithFrame:CGRectMake(kMenuWidth - 42, 12, 24, 24)];
@@ -594,7 +597,7 @@ static char kDKHiddenIndicatorKey;
                                             action:@selector(_handleMenuItemTap:)];
             [rowView addGestureRecognizer:tap];
             
-            if (!isAddAccount && !isHideOption && !isFilterToggle) {
+            if (!isAddAccount && !isHideOption && !isFilterToggle && !isClearData) {
                 UILongPressGestureRecognizer *longPress = [[UILongPressGestureRecognizer alloc]
                                                             initWithTarget:self
                                                             action:@selector(_handleMenuItemLongPress:)];
@@ -663,9 +666,9 @@ static char kDKHiddenIndicatorKey;
     [self hideAccountMenu];
     
     NSArray *accounts = [[DKAccountManager sharedManager] allAccountNames];
-    // 0: add, 1: default, 2..N+1: accounts, N+2: filter, N+3: hide
+    // 0: add, 1: default, 2..N+1: accounts, N+2: filter, N+3: clear data, N+4: hide
     NSInteger defaultAccountOffset = 1; // 默认账号在菜单中的偏移
-    NSInteger totalItems = 1 + defaultAccountOffset + accounts.count + 2;
+    NSInteger totalItems = 1 + defaultAccountOffset + accounts.count + 3;
     
     if (index == 0) {
         [self _promptAddAccount];
@@ -677,6 +680,8 @@ static char kDKHiddenIndicatorKey;
         [self hideFloatingButtonAnimated:YES];
         [self _showToast:@"悬浮按钮已隐藏，三指长按可重新呼出"];
     } else if (index == totalItems - 2) {
+        [self _promptClearMultiAccountData];
+    } else if (index == totalItems - 3) {
         [self _toggleContentFilter];
     } else {
         NSInteger accountIndex = index - 2;
@@ -776,6 +781,40 @@ static char kDKHiddenIndicatorKey;
         [alert addAction:cancelAction];
         [alert addAction:deleteAction];
         
+        UIViewController *rootVC = [self _rootViewController];
+        [rootVC presentViewController:alert animated:YES completion:nil];
+    });
+}
+
+#pragma mark - 清理多开数据确认
+
+- (void)_promptClearMultiAccountData {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"清理多开数据"
+                                                                       message:@"将删除所有添加的多开账号、账号快照和未读计数，但保留默认账号原始数据。清理后建议重启应用。"
+                                                                preferredStyle:UIAlertControllerStyleAlert];
+
+        UIAlertAction *cancelAction = [UIAlertAction actionWithTitle:@"取消"
+                                                               style:UIAlertActionStyleCancel
+                                                             handler:nil];
+
+        UIAlertAction *clearAction = [UIAlertAction actionWithTitle:@"确认清理"
+                                                              style:UIAlertActionStyleDestructive
+                                                            handler:^(UIAlertAction *action) {
+            BOOL success = [[DKAccountManager sharedManager] clearAllMultiAccountData];
+            if (success) {
+                [self _showToast:@"多开数据已清理，默认账号已保留"];
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                    exit(0);
+                });
+            } else {
+                [self _showToast:@"清理失败，请稍后重试"];
+            }
+        }];
+
+        [alert addAction:cancelAction];
+        [alert addAction:clearAction];
+
         UIViewController *rootVC = [self _rootViewController];
         [rootVC presentViewController:alert animated:YES completion:nil];
     });

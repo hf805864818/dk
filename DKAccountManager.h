@@ -30,6 +30,9 @@
 /// 删除账号
 - (BOOL)deleteAccountWithName:(NSString *)name;
 
+/// 清理所有多开账号数据，保留默认账号原始数据
+- (BOOL)clearAllMultiAccountData;
+
 /// 切换到指定账号
 - (BOOL)switchToAccount:(NSString *)name;
 

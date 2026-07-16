@@ -2,6 +2,7 @@
 #import "DKDataIsolation.h"
 #import "DKNetworkSessionManager.h"
 #import <UIKit/UIKit.h>
+#import <Security/Security.h>
 
 // ============================================================
 // 账号元数据存储键
@@ -218,6 +219,52 @@ static NSString *_accountsRootPath = nil;
     return YES;
 }
 
+- (BOOL)clearAllMultiAccountData {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *rootPath = self.accountsRootPath;
+    NSArray<NSString *> *accountNamesToClear = [_accountNames copy];
+
+    // 先把运行态重置为默认账号，避免清理后继续指向已删除的 B/C/D 账号目录。
+    _currentAccountName = kDKDefaultAccountName;
+    [_accountNames removeAllObjects];
+    [_metadataCache removeAllObjects];
+
+    // 插件内部状态必须写入原始 NSUserDefaults，不能被当前账号 Hook 到子账号 plist。
+    BOOL previousSwitching = _isSwitching;
+    _isSwitching = YES;
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    [defaults setObject:kDKDefaultAccountName forKey:kDKCurrentAccountKey];
+    [defaults removeObjectForKey:kDKAccountsKey];
+    [defaults removeObjectForKey:@"DK_NotificationCounts"];
+    [defaults synchronize];
+    _isSwitching = previousSwitching;
+
+    // 清理子账号 Keychain 项。只删除带 DK_账号名_ 前缀的项，保留默认账号原始 Keychain。
+    [self _clearKeychainItemsForAccountNames:accountNamesToClear];
+
+    NSError *removeError = nil;
+    if ([fm fileExistsAtPath:rootPath]) {
+        [fm removeItemAtPath:rootPath error:&removeError];
+        if (removeError) {
+            NSLog(@"[DK] 清理多开账号数据失败: %@", removeError);
+            return NO;
+        }
+    }
+
+    NSError *createError = nil;
+    [fm createDirectoryAtPath:rootPath
+  withIntermediateDirectories:YES
+                   attributes:@{NSFileProtectionKey: NSFileProtectionNone}
+                        error:&createError];
+    if (createError) {
+        NSLog(@"[DK] 重建账号根目录失败: %@", createError);
+        return NO;
+    }
+
+    NSLog(@"[DK] 已清理所有多开账号数据，默认账号原始数据已保留");
+    return YES;
+}
+
 #pragma mark - 账号切换
 
 - (BOOL)switchToAccount:(NSString *)name {
@@ -355,6 +402,112 @@ static NSString *_accountsRootPath = nil;
 }
 
 #pragma mark - Private
+
+- (BOOL)_keychainItem:(NSDictionary *)item hasAnyPrefix:(NSArray<NSString *> *)prefixes {
+    NSArray *keysToCheck = @[
+        (__bridge id)kSecAttrService,
+        (__bridge id)kSecAttrAccount,
+        (__bridge id)kSecAttrLabel
+    ];
+
+    for (id key in keysToCheck) {
+        id value = item[key];
+        if ([value isKindOfClass:[NSString class]]) {
+            for (NSString *prefix in prefixes) {
+                if ([value hasPrefix:prefix]) {
+                    return YES;
+                }
+            }
+        }
+    }
+
+    id generic = item[(__bridge id)kSecAttrGeneric];
+    if ([generic isKindOfClass:[NSData class]]) {
+        NSString *genericString = [[NSString alloc] initWithData:generic encoding:NSUTF8StringEncoding];
+        for (NSString *prefix in prefixes) {
+            if ([genericString hasPrefix:prefix]) {
+                return YES;
+            }
+        }
+    } else if ([generic isKindOfClass:[NSString class]]) {
+        for (NSString *prefix in prefixes) {
+            if ([generic hasPrefix:prefix]) {
+                return YES;
+            }
+        }
+    }
+
+    return NO;
+}
+
+- (void)_clearKeychainItemsForAccountNames:(NSArray<NSString *> *)accountNames {
+    if (accountNames.count == 0) return;
+
+    NSMutableArray<NSString *> *prefixes = [NSMutableArray array];
+    for (NSString *accountName in accountNames) {
+        if (accountName.length > 0 && ![accountName isEqualToString:kDKDefaultAccountName]) {
+            [prefixes addObject:[NSString stringWithFormat:@"DK_%@_", accountName]];
+        }
+    }
+    if (prefixes.count == 0) return;
+
+    NSArray *classes = @[
+        (__bridge id)kSecClassGenericPassword,
+        (__bridge id)kSecClassInternetPassword,
+        (__bridge id)kSecClassCertificate,
+        (__bridge id)kSecClassKey,
+        (__bridge id)kSecClassIdentity
+    ];
+
+    for (id secClass in classes) {
+        NSDictionary *query = @{
+            (__bridge id)kSecClass: secClass,
+            (__bridge id)kSecReturnAttributes: @YES,
+            (__bridge id)kSecMatchLimit: (__bridge id)kSecMatchLimitAll
+        };
+
+        CFTypeRef result = NULL;
+        OSStatus status = SecItemCopyMatching((__bridge CFDictionaryRef)query, &result);
+        if (status != errSecSuccess || !result) {
+            if (result) CFRelease(result);
+            continue;
+        }
+
+        NSArray *items = nil;
+        if (CFGetTypeID(result) == CFArrayGetTypeID()) {
+            items = (__bridge NSArray *)result;
+        } else if (CFGetTypeID(result) == CFDictionaryGetTypeID()) {
+            items = @[(__bridge NSDictionary *)result];
+        }
+
+        for (NSDictionary *item in items) {
+            if (![item isKindOfClass:[NSDictionary class]]) continue;
+            if (![self _keychainItem:item hasAnyPrefix:prefixes]) continue;
+
+            NSMutableDictionary *deleteQuery = [@{(__bridge id)kSecClass: secClass} mutableCopy];
+            NSArray *identityKeys = @[
+                (__bridge id)kSecAttrService,
+                (__bridge id)kSecAttrAccount,
+                (__bridge id)kSecAttrLabel,
+                (__bridge id)kSecAttrGeneric,
+                (__bridge id)kSecAttrAccessGroup
+            ];
+
+            for (id key in identityKeys) {
+                id value = item[key];
+                if (value) {
+                    deleteQuery[key] = value;
+                }
+            }
+
+            if (deleteQuery.count > 1) {
+                SecItemDelete((__bridge CFDictionaryRef)deleteQuery);
+            }
+        }
+
+        CFRelease(result);
+    }
+}
 
 - (void)_saveAccountList {
     NSString *listPath = [self.accountsRootPath stringByAppendingPathComponent:@".dk_accounts.plist"];
