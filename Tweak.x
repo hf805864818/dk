@@ -19,6 +19,7 @@
 #import "DKKeychainHook.h"
 #import "DKNetworkSessionManager.h"
 #import "DKPushNotificationBridge.h"
+#import "DKContentFilterBypass.h"
 
 // ============================================================
 // 版本号编译宏（由 Makefile 注入）
@@ -80,10 +81,16 @@ NSString* DKGetBuildTime(void) {
         [[DKKeychainHook sharedInstance] install];
         [[DKNetworkSessionManager sharedInstance] setup];
         [[DKPushNotificationBridge sharedInstance] setup];
+        [[DKContentFilterBypass sharedInstance] setup];
         [[DKAccountUI sharedInstance] setup];
         
         // 启动会话定期刷新
         [[DKNetworkSessionManager sharedInstance] scheduleSessionRefresh];
+        
+        // 延迟启动 UI 层敏感词过滤绕过（等应用完全启动后）
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            NSLog(@"[DK] 敏感词过滤绕过 UI 层 Hook 已就绪");
+        });
         
         NSLog(@"[DK] 所有模块初始化完成");
     }
@@ -532,6 +539,64 @@ didReceiveNotificationResponse:(UNNotificationResponse *)response
                                                                 withCompletionHandler:completionHandler];
     
     %orig;
+}
+
+%end
+
+// ============================================================
+// Hook 8: NSURLSession - 敏感词过滤绕过
+// 拦截网络响应数据，在 JSON 解析前替换错误码 983
+// 策略：包装 completionHandler，在原始回调前处理数据
+// ============================================================
+
+%hook NSURLSession
+
+- (NSURLSessionDataTask *)dataTaskWithRequest:(NSURLRequest *)request
+                            completionHandler:(void (^)(NSData *data, NSURLResponse *response, NSError *error))completionHandler {
+    
+    void (^wrappedHandler)(NSData *, NSURLResponse *, NSError *) = nil;
+    
+    if (completionHandler) {
+        wrappedHandler = ^(NSData *data, NSURLResponse *response, NSError *error) {
+            NSData *processedData = [[DKContentFilterBypass sharedInstance] processResponseData:data];
+            completionHandler(processedData, response, error);
+        };
+    }
+    
+    return %orig(request, wrappedHandler ?: completionHandler);
+}
+
+- (NSURLSessionDataTask *)dataTaskWithURL:(NSURL *)url
+                        completionHandler:(void (^)(NSData *data, NSURLResponse *response, NSError *error))completionHandler {
+    
+    void (^wrappedHandler)(NSData *, NSURLResponse *, NSError *) = nil;
+    
+    if (completionHandler) {
+        wrappedHandler = ^(NSData *data, NSURLResponse *response, NSError *error) {
+            NSData *processedData = [[DKContentFilterBypass sharedInstance] processResponseData:data];
+            completionHandler(processedData, response, error);
+        };
+    }
+    
+    return %orig(url, wrappedHandler ?: completionHandler);
+}
+
+%end
+
+// ============================================================
+// Hook 9: NSURLSessionDataDelegate - SSE/流式响应拦截
+// 拦截增量数据块，在数据到达时即时过滤敏感词标记
+// 覆盖 TRAE 的 SSE（Server-Sent Events）流式响应
+// ============================================================
+
+%hook NSObject
+
+- (void)DK_URLSession:(NSURLSession *)session
+             dataTask:(NSURLSessionDataTask *)dataTask
+       didReceiveData:(NSData *)data {
+    
+    NSData *processedData = [[DKContentFilterBypass sharedInstance] processResponseData:data];
+    [self DK_URLSession:session dataTask:dataTask didReceiveData:processedData];
 }
 
 %end
