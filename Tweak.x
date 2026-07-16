@@ -186,6 +186,84 @@ static OSStatus hooked_SecItemDelete(CFDictionaryRef query);
 %end
 
 // ============================================================
+// Hook 1.5: NSData / NSDictionary / NSArray / NSString / NSPropertyListSerialization
+// 文件读写重定向 — 这些是 iOS 应用最常用的文件读写 API
+// NSFileManager Hook 只拦截了部分操作，这些类方法也必须 Hook
+// ============================================================
+
+%hook NSData
+
++ (instancetype)dataWithContentsOfFile:(NSString *)path {
+    return %orig(DKRemapFilePath(path));
+}
+
+- (instancetype)initWithContentsOfFile:(NSString *)path {
+    return %orig(DKRemapFilePath(path));
+}
+
+- (BOOL)writeToFile:(NSString *)path atomically:(BOOL)atomically {
+    return %orig(DKRemapFilePath(path), atomically);
+}
+
+- (BOOL)writeToFile:(NSString *)path options:(NSDataWritingOptions)writeOptionsMask error:(NSError **)errorPtr {
+    return %orig(DKRemapFilePath(path), writeOptionsMask, errorPtr);
+}
+
+%end
+
+%hook NSDictionary
+
++ (NSDictionary *)dictionaryWithContentsOfFile:(NSString *)path {
+    return %orig(DKRemapFilePath(path));
+}
+
+- (BOOL)writeToFile:(NSString *)path atomically:(BOOL)atomically {
+    return %orig(DKRemapFilePath(path), atomically);
+}
+
+%end
+
+%hook NSArray
+
++ (NSArray *)arrayWithContentsOfFile:(NSString *)path {
+    return %orig(DKRemapFilePath(path));
+}
+
+- (BOOL)writeToFile:(NSString *)path atomically:(BOOL)atomically {
+    return %orig(DKRemapFilePath(path), atomically);
+}
+
+%end
+
+%hook NSString
+
++ (instancetype)stringWithContentsOfFile:(NSString *)path encoding:(NSStringEncoding)enc error:(NSError **)error {
+    return %orig(DKRemapFilePath(path), enc, error);
+}
+
+- (instancetype)initWithContentsOfFile:(NSString *)path encoding:(NSStringEncoding)enc error:(NSError **)error {
+    return %orig(DKRemapFilePath(path), enc, error);
+}
+
+- (BOOL)writeToFile:(NSString *)path atomically:(BOOL)atomically encoding:(NSStringEncoding)enc error:(NSError **)error {
+    return %orig(DKRemapFilePath(path), atomically, enc, error);
+}
+
+%end
+
+%hook NSPropertyListSerialization
+
++ (id)propertyListWithData:(NSData *)data options:(NSPropertyListReadOptions)opt format:(NSPropertyListFormat *)format error:(NSError **)error {
+    return %orig(data, opt, format, error);
+}
+
++ (NSData *)dataWithPropertyList:(id)plist format:(NSPropertyListFormat)format options:(NSPropertyListWriteOptions)opt error:(NSError **)error {
+    return %orig(plist, format, opt, error);
+}
+
+%end
+
+// ============================================================
 // Hook 2: NSUserDefaults - 配置隔离
 // 每个账号使用独立的 UserDefaults 存储
 // ============================================================
