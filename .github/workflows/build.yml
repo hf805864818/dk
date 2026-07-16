@@ -86,13 +86,12 @@ jobs:
           # 更新 VERSION 文件
           echo "$NEW_VERSION" > VERSION
 
-          # 更新 control 文件中的版本号
+          # 更新 control 文件中的版本号（影响 .deb 包名）
           sed -i '' "s/Version: .*/Version: $NEW_VERSION/" control 2>/dev/null || \
           sed -i "s/Version: .*/Version: $NEW_VERSION/" control
 
-          # 更新 Tweak.x 中的版本号日志
-          sed -i '' "s/DK Multi-Account Tweak v[0-9.]*/DK Multi-Account Tweak v$NEW_VERSION/" Tweak.x 2>/dev/null || \
-          sed -i "s/DK Multi-Account Tweak v[0-9.]*/DK Multi-Account Tweak v$NEW_VERSION/" Tweak.x
+          # 注意：Tweak.x 中的版本号不再需要手动替换
+          # Makefile 编译时自动从 VERSION 文件读取并通过 -DDK_VERSION 宏注入
 
       # ============================================================
       # 4. 安装 dpkg（用于打包 .deb）
@@ -270,7 +269,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          git add VERSION control CHANGELOG.md Tweak.x
+          git add VERSION control CHANGELOG.md
           git commit -m "chore: bump version to ${{ steps.bump.outputs.new_version }} [skip ci]" || echo "No changes to commit"
           git tag "v${{ steps.bump.outputs.new_version }}"
 

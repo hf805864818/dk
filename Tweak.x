@@ -21,6 +21,16 @@
 #import "DKPushNotificationBridge.h"
 
 // ============================================================
+// 版本号编译宏（由 Makefile 注入）
+// ============================================================
+#ifndef DK_VERSION
+#define DK_VERSION @"1.0.0"
+#endif
+#ifndef DK_BUILD_TIME
+#define DK_BUILD_TIME @"unknown"
+#endif
+
+// ============================================================
 // 路径映射工具函数声明
 // ============================================================
 extern NSString* DKRemapFilePath(NSString *path);
@@ -38,6 +48,17 @@ static NSString* DKGetCurrentBundleID(void) {
 }
 
 // ============================================================
+// 公开版本号获取函数（可在任意模块中调用）
+// ============================================================
+NSString* DKGetVersion(void) {
+    return DK_VERSION;
+}
+
+NSString* DKGetBuildTime(void) {
+    return DK_BUILD_TIME;
+}
+
+// ============================================================
 // 构造函数 - 插件加载时调用
 // ============================================================
 %ctor {
@@ -45,7 +66,8 @@ static NSString* DKGetCurrentBundleID(void) {
         NSString *bundleID = DKGetCurrentBundleID();
         
         NSLog(@"========================================");
-        NSLog(@"[DK] DK Multi-Account Tweak v1.0.0 已加载");
+        NSLog(@"[DK] DK Multi-Account Tweak v%@ 已加载", DK_VERSION);
+        NSLog(@"[DK] 构建时间: %@", DK_BUILD_TIME);
         NSLog(@"[DK] 当前应用: %@", bundleID);
         NSLog(@"[DK] 功能: 多账号切换 + 登录态保持 + 推送通知桥接");
         NSLog(@"========================================");

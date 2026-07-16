@@ -11,6 +11,12 @@ THEOS_PACKAGE_SCHEME = rootless
 # 注入目标进程（可多个）
 INSTALL_TARGET_PROCESSES = TRAE
 
+# ============================================================
+# 从 VERSION 文件读取版本号，作为编译宏注入
+# ============================================================
+DK_VERSION := $(shell cat $(THEOS_PROJECT_DIR)/VERSION 2>/dev/null || echo "1.0.0")
+DK_BUILD_TIME := $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
+
 include $(THEOS)/makefiles/common.mk
 
 # ============================================================
@@ -29,10 +35,16 @@ dk_FILES = Tweak.x \
            DKNetworkSessionManager.m \
            DKPushNotificationBridge.m
 
-# 编译选项
-dk_CFLAGS = -fobjc-arc -Wno-error -I.
-dk_CCFLAGS = -fobjc-arc -Wno-error -I.
-dk_OBJCFLAGS = -fobjc-arc -Wno-error -I.
+# 编译选项 — 版本号作为预处理器宏注入
+dk_CFLAGS = -fobjc-arc -Wno-error -I. \
+            -DDK_VERSION='@"$(DK_VERSION)"' \
+            -DDK_BUILD_TIME='@"$(DK_BUILD_TIME)"'
+dk_CCFLAGS = -fobjc-arc -Wno-error -I. \
+             -DDK_VERSION='@"$(DK_VERSION)"' \
+             -DDK_BUILD_TIME='@"$(DK_BUILD_TIME)"'
+dk_OBJCFLAGS = -fobjc-arc -Wno-error -I. \
+               -DDK_VERSION='@"$(DK_VERSION)"' \
+               -DDK_BUILD_TIME='@"$(DK_BUILD_TIME)"'
 
 # 链接框架（新增 UserNotifications）
 dk_FRAMEWORKS = UIKit Foundation Security CoreGraphics UserNotifications
