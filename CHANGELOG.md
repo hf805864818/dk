@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.0.23] - 2026-07-16
+
+- f1ec95f fix: full defaults domain snapshot and multi-class keychain backup
+
+
 ## [1.0.22] - 2026-07-16
 
 - fefd6d5 fix: remove sharedUserDefaults call and protect keychain delete
