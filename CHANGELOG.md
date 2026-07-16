@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.0.29] - 2026-07-16
+
+- d6b22fe fix: 修复子账号启动后显示默认账号页面的问题
+
+
 ## [1.0.28] - 2026-07-16
 
 - a91faf8 fix: 修复编译错误 - DKAccountUI.h 缺少 triggerShowFloatingButton 声明
