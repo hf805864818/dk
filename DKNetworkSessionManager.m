@@ -72,15 +72,27 @@ static BOOL DKSessionRestoreInProgress = NO;
     return YES;
 }
 
+- (BOOL)hasSessionSnapshotForAccount:(NSString *)accountName {
+    NSString *sessionPath = [self sessionPathForAccount:accountName];
+    return [[NSFileManager defaultManager] fileExistsAtPath:sessionPath];
+}
+
 - (void)restoreSessionForAccount:(NSString *)accountName {
+    [self restoreSessionForAccount:accountName clearCookiesIfMissing:NO];
+}
+
+- (void)restoreSessionForAccount:(NSString *)accountName clearCookiesIfMissing:(BOOL)clearCookiesIfMissing {
     NSString *sessionPath = [self sessionPathForAccount:accountName];
     NSFileManager *fm = [NSFileManager defaultManager];
     
     if (![fm fileExistsAtPath:sessionPath]) {
         NSLog(@"[DK] 账号 %@ 没有已保存的会话数据", accountName);
         // 新增的非默认账号没有会话时，清空当前 Cookie，避免沿用上一个账号。
+        // 如果升级插件时当前在 B/C/D，默认账号可能没有快照；
+        // 用户主动切回默认账号时也要清空子账号 Cookie，进入干净的默认账号环境。
         DKAccountManager *manager = [DKAccountManager sharedManager];
-        if (![accountName isEqualToString:[manager defaultAccountName]]) {
+        if (clearCookiesIfMissing ||
+            ![accountName isEqualToString:[manager defaultAccountName]]) {
             DKSessionRestoreInProgress = YES;
             @try {
                 [self _clearAllCookies];

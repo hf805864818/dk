@@ -22,8 +22,14 @@
 /// 如果当前正在使用默认账号，则立即保存默认账号会话快照
 - (BOOL)snapshotDefaultSessionIfActive;
 
+/// 判断指定账号是否已有会话快照
+- (BOOL)hasSessionSnapshotForAccount:(NSString *)accountName;
+
 /// 恢复指定账号的网络会话状态
 - (void)restoreSessionForAccount:(NSString *)accountName;
+
+/// 恢复指定账号的网络会话状态；缺少快照时可选择清空当前 Cookie
+- (void)restoreSessionForAccount:(NSString *)accountName clearCookiesIfMissing:(BOOL)clearCookiesIfMissing;
 
 /// 为指定账号备份网络会话数据
 - (void)backupSessionForAccount:(NSString *)accountName;

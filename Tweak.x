@@ -754,7 +754,14 @@ int hooked_openat(int fd, const char *path, int flags, mode_t mode);
         // 启动时如果当前是默认账号，延迟保存一份默认账号快照。
         // 这样升级插件或首次使用时，即使还没添加 B 账号，也能先把默认登录态留住。
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            [[DKNetworkSessionManager sharedManager] snapshotDefaultSessionIfActive];
+            DKAccountManager *manager = [DKAccountManager sharedManager];
+            DKNetworkSessionManager *sessionManager = [DKNetworkSessionManager sharedManager];
+            if ([[manager currentAccountName] isEqualToString:[manager defaultAccountName]]) {
+                [sessionManager snapshotDefaultSessionIfActive];
+            } else if (![sessionManager hasSessionSnapshotForAccount:[manager defaultAccountName]]) {
+                NSLog(@"[DK] 当前为子账号 %@，默认账号暂无快照；切回默认并登录后会自动保存",
+                      [manager currentAccountName]);
+            }
         });
         
         NSLog(@"[DK] ✅ 所有模块初始化完成，等待手势安装...");
