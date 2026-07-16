@@ -1,6 +1,10 @@
 // ============================================================
 // DK Multi-Account Tweak - Main Entry Point
 // 使用 Logos 语法进行 Method Swizzling / MSHook
+//
+// 注意：所有 %hook 块必须在 %ctor 之前！
+// Logos internal generator 不会生成前向声明，
+// 如果 %hook 在 %ctor 之后，_logos_method$_ungrouped$ 符号未定义。
 // ============================================================
 
 #import <UIKit/UIKit.h>
@@ -60,7 +64,7 @@ NSString* DKGetBuildTime(void) {
 }
 
 // ============================================================
-// Keychain C 函数 Hook 前向声明（定义在文件后面）
+// Keychain C 函数 Hook 前向声明
 // ============================================================
 static OSStatus (*original_SecItemAdd)(CFDictionaryRef query, CFTypeRef *result);
 static OSStatus (*original_SecItemCopyMatching)(CFDictionaryRef query, CFTypeRef *result);
@@ -71,67 +75,6 @@ static OSStatus hooked_SecItemAdd(CFDictionaryRef query, CFTypeRef *result);
 static OSStatus hooked_SecItemCopyMatching(CFDictionaryRef query, CFTypeRef *result);
 static OSStatus hooked_SecItemUpdate(CFDictionaryRef query, CFDictionaryRef attributesToUpdate);
 static OSStatus hooked_SecItemDelete(CFDictionaryRef query);
-
-// ============================================================
-// 构造函数 - 插件加载时调用
-// ============================================================
-%ctor {
-    // 初始化所有 %hook（必须在 autoreleasepool 之前）
-    %init;
-    
-    @autoreleasepool {
-        NSString *bundleID = DKGetCurrentBundleID();
-        
-        NSLog(@"========================================");
-        NSLog(@"[DK] DK Multi-Account Tweak v%@ 已加载", DK_VERSION);
-        NSLog(@"[DK] 构建时间: %@", DK_BUILD_TIME);
-        NSLog(@"[DK] 当前应用: %@", bundleID);
-        NSLog(@"[DK] 功能: 多账号切换 + 登录态保持 + 推送通知桥接");
-        NSLog(@"========================================");
-        
-        // 初始化各模块
-        [[DKAccountManager sharedManager] refreshAccountList];
-        [[DKDataIsolation sharedInstance] setup];
-        [[DKFileManagerHook sharedInstance] install];
-        [[DKUserDefaultsHook sharedInstance] install];
-        [[DKKeychainHook sharedInstance] install];
-        [[DKNetworkSessionManager sharedManager] setup];
-        [[DKPushNotificationBridge sharedInstance] setup];
-        [[DKContentFilterBypass sharedInstance] setup];
-        [[DKAccountUI sharedInstance] setup];
-        
-        // 启动会话定期刷新
-        [[DKNetworkSessionManager sharedManager] scheduleSessionRefresh];
-        
-        NSLog(@"[DK] ✅ 所有模块初始化完成，等待手势安装...");
-        
-        // 安装 Keychain C 函数 Hook
-        MSHookFunction((void *)SecItemAdd, (void *)hooked_SecItemAdd, (void **)&original_SecItemAdd);
-        MSHookFunction((void *)SecItemCopyMatching, (void *)hooked_SecItemCopyMatching, (void **)&original_SecItemCopyMatching);
-        MSHookFunction((void *)SecItemUpdate, (void *)hooked_SecItemUpdate, (void **)&original_SecItemUpdate);
-        MSHookFunction((void *)SecItemDelete, (void *)hooked_SecItemDelete, (void **)&original_SecItemDelete);
-        NSLog(@"[DK] Keychain Hook 已安装");
-        
-        // 延迟启动 UI 层敏感词过滤绕过（等应用完全启动后）
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            NSLog(@"[DK] 敏感词过滤绕过 UI 层 Hook 已就绪");
-        });
-        
-        NSLog(@"[DK] 所有模块初始化完成");
-    }
-}
-
-// ============================================================
-// %dtor - 插件卸载时调用（用于调试）
-// ============================================================
-%dtor {
-    @autoreleasepool {
-        [[DKAccountUI sharedInstance] cleanup];
-        [[DKAccountManager sharedManager] saveCurrentState];
-        [[DKNetworkSessionManager sharedManager] saveCurrentSession];
-        NSLog(@"[DK] DK Multi-Account Tweak 已卸载");
-    }
-}
 
 // ============================================================
 // Hook 1: NSFileManager - 文件路径重定向
@@ -335,59 +278,7 @@ static OSStatus hooked_SecItemDelete(CFDictionaryRef query);
 %end
 
 // ============================================================
-// Hook 3: Keychain - 钥匙串隔离
-// 通过给 service/account 添加前缀实现每个账号的独立 Keychain
-// 使用 MSHookFunction 直接 Hook C 函数
-// ============================================================
-
-static OSStatus hooked_SecItemAdd(CFDictionaryRef query, CFTypeRef *result) {
-    NSDictionary *nsQuery = (__bridge NSDictionary *)query;
-    NSDictionary *mappedQuery = DKRemapKeychainQuery(nsQuery);
-    return original_SecItemAdd((__bridge CFDictionaryRef)mappedQuery, result);
-}
-
-static OSStatus hooked_SecItemCopyMatching(CFDictionaryRef query, CFTypeRef *result) {
-    NSDictionary *nsQuery = (__bridge NSDictionary *)query;
-    NSDictionary *mappedQuery = DKRemapKeychainQuery(nsQuery);
-    OSStatus status = original_SecItemCopyMatching((__bridge CFDictionaryRef)mappedQuery, result);
-    
-    if (status == errSecSuccess && result && *result) {
-        if (CFGetTypeID(*result) == CFDictionaryGetTypeID()) {
-            NSDictionary *unmapped = DKUnmapKeychainResult((__bridge NSDictionary *)(*result));
-            if (*result) CFRelease(*result);
-            *result = (__bridge_retained CFTypeRef)unmapped;
-        } else if (CFGetTypeID(*result) == CFArrayGetTypeID()) {
-            NSArray *items = (__bridge NSArray *)(*result);
-            NSMutableArray *unmappedItems = [NSMutableArray array];
-            for (id item in items) {
-                if ([item isKindOfClass:[NSDictionary class]]) {
-                    [unmappedItems addObject:DKUnmapKeychainResult(item)];
-                } else {
-                    [unmappedItems addObject:item];
-                }
-            }
-            if (*result) CFRelease(*result);
-            *result = (__bridge_retained CFTypeRef)unmappedItems;
-        }
-    }
-    
-    return status;
-}
-
-static OSStatus hooked_SecItemUpdate(CFDictionaryRef query, CFDictionaryRef attributesToUpdate) {
-    NSDictionary *nsQuery = (__bridge NSDictionary *)query;
-    NSDictionary *mappedQuery = DKRemapKeychainQuery(nsQuery);
-    return original_SecItemUpdate((__bridge CFDictionaryRef)mappedQuery, attributesToUpdate);
-}
-
-static OSStatus hooked_SecItemDelete(CFDictionaryRef query) {
-    NSDictionary *nsQuery = (__bridge NSDictionary *)query;
-    NSDictionary *mappedQuery = DKRemapKeychainQuery(nsQuery);
-    return original_SecItemDelete((__bridge CFDictionaryRef)mappedQuery);
-}
-
-// ============================================================
-// Hook 4: NSHTTPCookieStorage - Cookie 隔离
+// Hook 3: NSHTTPCookieStorage - Cookie 隔离
 // 每个账号维护独立的 Cookie 存储
 // ============================================================
 
@@ -411,7 +302,7 @@ static OSStatus hooked_SecItemDelete(CFDictionaryRef query) {
 %end
 
 // ============================================================
-// Hook 5: UIApplication - 生命周期 + 推送通知
+// Hook 4: UIApplication - 生命周期 + 推送通知
 // 确保在应用状态变化时保存/恢复会话
 // 拦截推送注册回调，记录 deviceToken
 // ============================================================
@@ -479,7 +370,7 @@ fetchCompletionHandler:(void (^)(UIBackgroundFetchResult))completionHandler {
 %end
 
 // ============================================================
-// Hook 6: NSURLSessionConfiguration - 网络配置隔离
+// Hook 5: NSURLSessionConfiguration - 网络配置隔离
 // 每个账号使用独立的 URLSession 配置
 // ============================================================
 
@@ -530,7 +421,7 @@ fetchCompletionHandler:(void (^)(UIBackgroundFetchResult))completionHandler {
 %end
 
 // ============================================================
-// Hook 7: UNUserNotificationCenter (iOS 10+)
+// Hook 6: UNUserNotificationCenter (iOS 10+)
 // 拦截推送通知展示和点击
 // ============================================================
 
@@ -562,7 +453,7 @@ didReceiveNotificationResponse:(UNNotificationResponse *)response
 %end
 
 // ============================================================
-// Hook 8: NSURLSession - 敏感词过滤绕过
+// Hook 7: NSURLSession - 敏感词过滤绕过
 // 拦截网络响应数据，在 JSON 解析前替换错误码 983
 // 策略：包装 completionHandler，在原始回调前处理数据
 // ============================================================
@@ -602,8 +493,120 @@ didReceiveNotificationResponse:(UNNotificationResponse *)response
 %end
 
 // ============================================================
+// 构造函数 - 插件加载时调用
+// ============================================================
+%ctor {
+    %init;
+    
+    @autoreleasepool {
+        NSString *bundleID = DKGetCurrentBundleID();
+        
+        NSLog(@"========================================");
+        NSLog(@"[DK] DK Multi-Account Tweak v%@ 已加载", DK_VERSION);
+        NSLog(@"[DK] 构建时间: %@", DK_BUILD_TIME);
+        NSLog(@"[DK] 当前应用: %@", bundleID);
+        NSLog(@"[DK] 功能: 多账号切换 + 登录态保持 + 推送通知桥接");
+        NSLog(@"========================================");
+        
+        // 初始化各模块
+        [[DKAccountManager sharedManager] refreshAccountList];
+        [[DKDataIsolation sharedInstance] setup];
+        [[DKFileManagerHook sharedInstance] install];
+        [[DKUserDefaultsHook sharedInstance] install];
+        [[DKKeychainHook sharedInstance] install];
+        [[DKNetworkSessionManager sharedManager] setup];
+        [[DKPushNotificationBridge sharedInstance] setup];
+        [[DKContentFilterBypass sharedInstance] setup];
+        [[DKAccountUI sharedInstance] setup];
+        
+        // 启动会话定期刷新
+        [[DKNetworkSessionManager sharedManager] scheduleSessionRefresh];
+        
+        NSLog(@"[DK] ✅ 所有模块初始化完成，等待手势安装...");
+        
+        // 安装 Keychain C 函数 Hook
+        MSHookFunction((void *)SecItemAdd, (void *)hooked_SecItemAdd, (void **)&original_SecItemAdd);
+        MSHookFunction((void *)SecItemCopyMatching, (void *)hooked_SecItemCopyMatching, (void **)&original_SecItemCopyMatching);
+        MSHookFunction((void *)SecItemUpdate, (void *)hooked_SecItemUpdate, (void **)&original_SecItemUpdate);
+        MSHookFunction((void *)SecItemDelete, (void *)hooked_SecItemDelete, (void **)&original_SecItemDelete);
+        NSLog(@"[DK] Keychain Hook 已安装");
+        
+        // 延迟启动 UI 层敏感词过滤绕过（等应用完全启动后）
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            NSLog(@"[DK] 敏感词过滤绕过 UI 层 Hook 已就绪");
+        });
+        
+        NSLog(@"[DK] 所有模块初始化完成");
+    }
+}
+
+// ============================================================
+// %dtor - 插件卸载时调用（用于调试）
+// ============================================================
+%dtor {
+    @autoreleasepool {
+        [[DKAccountUI sharedInstance] cleanup];
+        [[DKAccountManager sharedManager] saveCurrentState];
+        [[DKNetworkSessionManager sharedManager] saveCurrentSession];
+        NSLog(@"[DK] DK Multi-Account Tweak 已卸载");
+    }
+}
+
+// ============================================================
+// Keychain - 钥匙串隔离（C 函数 Hook）
+// 通过给 service/account 添加前缀实现每个账号的独立 Keychain
+// 使用 MSHookFunction 直接 Hook C 函数
+// ============================================================
+
+static OSStatus hooked_SecItemAdd(CFDictionaryRef query, CFTypeRef *result) {
+    NSDictionary *nsQuery = (__bridge NSDictionary *)query;
+    NSDictionary *mappedQuery = DKRemapKeychainQuery(nsQuery);
+    return original_SecItemAdd((__bridge CFDictionaryRef)mappedQuery, result);
+}
+
+static OSStatus hooked_SecItemCopyMatching(CFDictionaryRef query, CFTypeRef *result) {
+    NSDictionary *nsQuery = (__bridge NSDictionary *)query;
+    NSDictionary *mappedQuery = DKRemapKeychainQuery(nsQuery);
+    OSStatus status = original_SecItemCopyMatching((__bridge CFDictionaryRef)mappedQuery, result);
+    
+    if (status == errSecSuccess && result && *result) {
+        if (CFGetTypeID(*result) == CFDictionaryGetTypeID()) {
+            NSDictionary *unmapped = DKUnmapKeychainResult((__bridge NSDictionary *)(*result));
+            if (*result) CFRelease(*result);
+            *result = (__bridge_retained CFTypeRef)unmapped;
+        } else if (CFGetTypeID(*result) == CFArrayGetTypeID()) {
+            NSArray *items = (__bridge NSArray *)(*result);
+            NSMutableArray *unmappedItems = [NSMutableArray array];
+            for (id item in items) {
+                if ([item isKindOfClass:[NSDictionary class]]) {
+                    [unmappedItems addObject:DKUnmapKeychainResult(item)];
+                } else {
+                    [unmappedItems addObject:item];
+                }
+            }
+            if (*result) CFRelease(*result);
+            *result = (__bridge_retained CFTypeRef)unmappedItems;
+        }
+    }
+    
+    return status;
+}
+
+static OSStatus hooked_SecItemUpdate(CFDictionaryRef query, CFDictionaryRef attributesToUpdate) {
+    NSDictionary *nsQuery = (__bridge NSDictionary *)query;
+    NSDictionary *mappedQuery = DKRemapKeychainQuery(nsQuery);
+    return original_SecItemUpdate((__bridge CFDictionaryRef)mappedQuery, attributesToUpdate);
+}
+
+static OSStatus hooked_SecItemDelete(CFDictionaryRef query) {
+    NSDictionary *nsQuery = (__bridge NSDictionary *)query;
+    NSDictionary *mappedQuery = DKRemapKeychainQuery(nsQuery);
+    return original_SecItemDelete((__bridge CFDictionaryRef)mappedQuery);
+}
+
+// ============================================================
 // Hook 9: SSE/流式响应拦截 (注释)
-// TRAE 的 SSE 流式响应已通过 Hook 8 的 NSURLSession completionHandler
+// TRAE 的 SSE 流式响应已通过 Hook 7 的 NSURLSession completionHandler
 // 包装覆盖。对于流式 API，数据在 completion 中统一处理。
 // 如需更精细的逐块拦截，可在运行时通过 MSHookMessageEx 动态绑定。
 // ============================================================
