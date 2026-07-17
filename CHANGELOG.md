@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.42] - 2026-07-17
+
+- be5371f 修复: 补回被误删的 Keychain extern 函数声明 (DKRemapKeychainQuery 等4个)
+- ece0bef 新增: 指定默认账号功能 - 设为默认账号后更新插件无需重新登录
+- bc19866 修复: 借鉴Crane容器级隔离 + 修补NSUserDefaults域级Hook + 移除文件路径Hook
+
+
 ## [1.0.41] - 2026-07-17
 
 - 03d7e78 fix: 添加 CFPreferences 非 App 版本 Hook，修复切换账号后登录态丢失
