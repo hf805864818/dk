@@ -390,92 +390,122 @@ static NSString *const kDKLibraryOwnerFile = @".dk_library_owner";
     // 所有权不匹配：在 %ctor 中执行数据交换。
     // 此时 App 尚未初始化，MMKV/WCDB 等库未打开任何文件。
     //
+    // 核心设计：
+    //   - 默认账号的数据直接存储在沙盒 Library/ 中（Hook 不重定向），
+    //     切换时需备份到 .default_backup/ 再恢复。
+    //   - 子账号的数据由 Hook 实时重定向到隔离目录
+    //     （如 B账号/Library/、B账号/Documents/），沙盒 Library/
+    //     在子账号活跃期间始终为空。切换时无需备份沙盒（空目录），
+    //     也无需从备份恢复（Hook 自动重定向到隔离目录）。
+    //
     // 策略：
-    //   1. 先尝试 rename() 整个 Library/（最快，只改 inode 指针）
-    //   2. rename() 失败时，用递归删除清空 Library/ 内容
-    //      （不依赖 _moveSubdirectories，因为 rename 子目录也可能失败，
-    //        且 removeItemAtPath 对非空目录静默失败）
-    //   3. 创建空目录结构或恢复目标账号数据
+    //   1. 旧所有者是默认账号 → 备份沙盒 Library/ 到 .default_backup/
+    //   2. 旧所有者是子账号 → 沙盒为空，跳过备份，直接清空
+    //   3. 当前账号是默认 → 从 .default_backup/ 恢复到沙盒
+    //   4. 当前账号是子账号 → 清空沙盒即可，Hook 会重定向到隔离目录
     // ============================================================
     NSString *sandboxLib = [[self appHomePath] stringByAppendingPathComponent:@"Library"];
     NSString *oldOwner = owner ?: defaultAccount;
     NSFileManager *fm = [NSFileManager defaultManager];
-
-    // Step 1: 备份当前 Library/ 到旧所有者
-    NSString *oldBackup = [self backupRootPathForAccount:oldOwner];
-    NSString *oldBackupLib = [oldBackup stringByAppendingPathComponent:@"Library"];
-
-    [fm createDirectoryAtPath:oldBackup
-  withIntermediateDirectories:YES
-                   attributes:@{NSFileProtectionKey: NSFileProtectionNone}
-                        error:nil];
-
-    // 如果旧备份已存在，挪开
-    if ([fm fileExistsAtPath:oldBackupLib]) {
-        NSString *tmpLib = [oldBackupLib stringByAppendingString:@".tmp"];
-        [fm removeItemAtPath:tmpLib error:nil];
-        rename([oldBackupLib fileSystemRepresentation], [tmpLib fileSystemRepresentation]);
-        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0), ^{
-            [[NSFileManager defaultManager] removeItemAtPath:tmpLib error:nil];
-        });
-    }
+    BOOL oldOwnerIsDefault = [oldOwner isEqualToString:defaultAccount];
+    BOOL currentIsDefault = [currentAccount isEqualToString:defaultAccount];
 
     const char *srcPath = [sandboxLib fileSystemRepresentation];
-    const char *dstPath = [oldBackupLib fileSystemRepresentation];
 
-    BOOL renameSucceeded = (rename(srcPath, dstPath) == 0);
+    // ============================================================
+    // Step 1: 备份当前沙盒 Library/（仅当旧所有者是默认账号时）
+    //
+    // 子账号的数据由 Hook 实时写入隔离目录，沙盒 Library/ 为空。
+    // 备份空沙盒会覆盖 .default_backup/ 中的有效数据，导致
+    // 后续切回默认账号时数据丢失。
+    // ============================================================
+    if (oldOwnerIsDefault) {
+        NSString *oldBackup = [self backupRootPathForAccount:oldOwner];
+        NSString *oldBackupLib = [oldBackup stringByAppendingPathComponent:@"Library"];
 
-    if (renameSucceeded) {
-        NSLog(@"[DK] ✅ rename Library/ → 「%@」备份", oldOwner);
-    } else {
-        // ============================================================
-        // rename() 失败：改用递归删除 + 重建策略。
-        //
-        // 为什么不用 _moveSubdirectories？
-        //   _moveSubdirectories 内部也用 rename() 逐个子目录搬移，
-        //   如果整目录 rename 失败，子目录 rename 大概率也失败。
-        //   且失败后 removeItemAtPath 对非空目录静默失败，
-        //   导致旧数据残留。
-        //
-        // 递归删除为什么可靠？
-        //   %ctor 阶段 App 未初始化，所有文件空闲。
-        //   先递归删除子目录内容 → 空目录 → removeItemAtPath 成功。
-        //   文件 removeItemAtPath 在无 fd 占用时必定成功。
-        // ============================================================
-        NSLog(@"[DK] ⚠️ rename Library/ 失败 (errno=%d), 改用递归删除策略", errno);
+        [fm createDirectoryAtPath:oldBackup
+      withIntermediateDirectories:YES
+                       attributes:@{NSFileProtectionKey: NSFileProtectionNone}
+                            error:nil];
 
-        // 先尝试把能搬的子目录搬走（保底备份）
-        [self _moveSubdirectories:sandboxLib toDirectory:oldBackupLib];
+        // 如果旧备份已存在，挪开
+        if ([fm fileExistsAtPath:oldBackupLib]) {
+            NSString *tmpLib = [oldBackupLib stringByAppendingString:@".tmp"];
+            [fm removeItemAtPath:tmpLib error:nil];
+            rename([oldBackupLib fileSystemRepresentation], [tmpLib fileSystemRepresentation]);
+            dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0), ^{
+                [[NSFileManager defaultManager] removeItemAtPath:tmpLib error:nil];
+            });
+        }
 
-        // 递归删除 Library/ 中残留的所有内容
-        [self _recursiveDeleteContentsOfDirectory:sandboxLib];
-        NSLog(@"[DK] 递归删除 Library/ 内容完成");
-    }
+        const char *dstPath = [oldBackupLib fileSystemRepresentation];
+        BOOL renameSucceeded = (rename(srcPath, dstPath) == 0);
 
-    // Step 2: 恢复目标账号数据或创建空目录
-    NSString *targetBackup = [self backupRootPathForAccount:currentAccount];
-    NSString *targetBackupLib = [targetBackup stringByAppendingPathComponent:@"Library"];
-
-    if ([fm fileExistsAtPath:targetBackupLib]) {
-        // 有备份：rename 到沙盒
-        if (rename([targetBackupLib fileSystemRepresentation], srcPath) == 0) {
-            NSLog(@"[DK] ✅ rename 「%@」备份 → Library/", currentAccount);
+        if (renameSucceeded) {
+            NSLog(@"[DK] ✅ rename Library/ → .default_backup/（默认账号备份）");
         } else {
-            NSLog(@"[DK] ⚠️ rename 恢复失败 (errno=%d), 逐个子目录搬移", errno);
-            [self _moveSubdirectories:targetBackupLib toDirectory:sandboxLib];
+            NSLog(@"[DK] ⚠️ rename Library/ 失败 (errno=%d), 改用递归删除策略", errno);
+            [self _moveSubdirectories:sandboxLib toDirectory:oldBackupLib];
+            [self _recursiveDeleteContentsOfDirectory:sandboxLib];
+            NSLog(@"[DK] 递归删除 Library/ 内容完成");
         }
     } else {
-        // 新账号无备份：创建空 Library/
-        // 如果 rename 成功，Library/ 已被移走，sandboxLib 不存在。
-        // 如果 rename 失败，Library/ 已被递归清空，sandboxLib 是空目录。
-        // 两种情况下都需要确保子目录存在。
+        // 旧所有者是子账号：沙盒 Library/ 为空（Hook 已重定向写入），
+        // 直接清空即可，无需备份。子账号的隔离目录数据完好无损。
+        NSLog(@"[DK] 旧所有者「%@」是子账号，沙盒为空，跳过备份直接清空", oldOwner);
+        [self _recursiveDeleteContentsOfDirectory:sandboxLib];
+        // 确保 sandboxLib 目录存在（递归删除后目录还在）
         if (![fm fileExistsAtPath:sandboxLib]) {
             [fm createDirectoryAtPath:sandboxLib
           withIntermediateDirectories:YES
                            attributes:@{NSFileProtectionKey: NSFileProtectionNone}
                                 error:nil];
         }
-        NSLog(@"[DK] 「%@」无备份，创建空目录结构", currentAccount);
+    }
+
+    // ============================================================
+    // Step 2: 恢复目标账号数据或创建空目录
+    // ============================================================
+    if (currentIsDefault) {
+        // 当前账号是默认：从 .default_backup/ 恢复
+        NSString *targetBackup = [self backupRootPathForAccount:currentAccount];
+        NSString *targetBackupLib = [targetBackup stringByAppendingPathComponent:@"Library"];
+
+        if ([fm fileExistsAtPath:targetBackupLib]) {
+            if (rename([targetBackupLib fileSystemRepresentation], srcPath) == 0) {
+                NSLog(@"[DK] ✅ rename .default_backup/ → Library/（恢复默认账号数据）");
+            } else {
+                NSLog(@"[DK] ⚠️ rename 恢复失败 (errno=%d), 逐个子目录搬移", errno);
+                [self _moveSubdirectories:targetBackupLib toDirectory:sandboxLib];
+            }
+        } else {
+            NSLog(@"[DK] ⚠️ .default_backup/ 不存在，创建空 Library/");
+            if (![fm fileExistsAtPath:sandboxLib]) {
+                [fm createDirectoryAtPath:sandboxLib
+              withIntermediateDirectories:YES
+                               attributes:@{NSFileProtectionKey: NSFileProtectionNone}
+                                    error:nil];
+            }
+            for (NSString *sub in @[@"Preferences", @"Caches", @"Cookies", @"Application Support"]) {
+                NSString *subPath = [sandboxLib stringByAppendingPathComponent:sub];
+                if (![fm fileExistsAtPath:subPath]) {
+                    [fm createDirectoryAtPath:subPath
+                  withIntermediateDirectories:YES
+                                   attributes:@{NSFileProtectionKey: NSFileProtectionNone}
+                                        error:nil];
+                }
+            }
+        }
+    } else {
+        // 当前账号是子账号：清空沙盒即可，Hook 会重定向到隔离目录
+        NSLog(@"[DK] 当前账号「%@」是子账号，清空沙盒（Hook 将重定向到隔离目录）", currentAccount);
+        // 确保 sandboxLib 存在且有子目录
+        if (![fm fileExistsAtPath:sandboxLib]) {
+            [fm createDirectoryAtPath:sandboxLib
+          withIntermediateDirectories:YES
+                           attributes:@{NSFileProtectionKey: NSFileProtectionNone}
+                                error:nil];
+        }
         for (NSString *sub in @[@"Preferences", @"Caches", @"Cookies", @"Application Support"]) {
             NSString *subPath = [sandboxLib stringByAppendingPathComponent:sub];
             if (![fm fileExistsAtPath:subPath]) {
