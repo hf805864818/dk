@@ -17,6 +17,8 @@
 #import <sys/stat.h>
 #import <unistd.h>
 #import <fcntl.h>
+#import <stdarg.h>
+#import <stdio.h>
 #import "fishhook/fishhook.h"
 
 #import "DKAccountManager.h"
@@ -108,6 +110,26 @@ static Boolean hooked_CFPreferencesSynchronize(CFStringRef applicationID, CFStri
 static CFArrayRef hooked_CFPreferencesCopyKeyList(CFStringRef applicationID, CFStringRef userName, CFStringRef hostName);
 static void hooked_CFPreferencesSetMultiple(CFDictionaryRef keysToSet, CFArrayRef keysToRemove, CFStringRef applicationID, CFStringRef userName, CFStringRef hostName);
 static CFDictionaryRef hooked_CFPreferencesCopyMultiple(CFArrayRef keysToFetch, CFStringRef applicationID, CFStringRef userName, CFStringRef hostName);
+
+// ============================================================
+// POSIX 文件操作 C 函数 Hook 前向声明
+// MMKV / WCDB / SQLCipher 等 C/C++ 库直接使用 open()/stat() 等
+// POSIX API 读写文件，绕过所有 ObjC 层 Hook（NSFileManager 等）。
+// 必须通过 fishhook 拦截这些底层调用，将路径重定向到隔离目录。
+// ============================================================
+static int (*original_open)(const char *path, int flags, ...);
+static int (*original_openat)(int fd, const char *path, int flags, ...);
+static int (*original_stat)(const char *path, struct stat *buf);
+static int (*original_lstat)(const char *path, struct stat *buf);
+static int (*original_access)(const char *path, int mode);
+static FILE *(*original_fopen)(const char *path, const char *mode);
+
+static int hooked_open(const char *path, int flags, ...);
+static int hooked_openat(int fd, const char *path, int flags, ...);
+static int hooked_stat(const char *path, struct stat *buf);
+static int hooked_lstat(const char *path, struct stat *buf);
+static int hooked_access(const char *path, int mode);
+static FILE *hooked_fopen(const char *path, const char *mode);
 
 // CFPreferences 隔离用 plist 路径
 // 与 NSUserDefaults Hook 共享同一个账号隔离 plist，
@@ -775,9 +797,16 @@ didReceiveNotificationResponse:(UNNotificationResponse *)response
             {"CFPreferencesCopyKeyList",    hooked_CFPreferencesCopyKeyList,    (void **)&original_CFPreferencesCopyKeyList},
             {"CFPreferencesSetMultiple",    hooked_CFPreferencesSetMultiple,    (void **)&original_CFPreferencesSetMultiple},
             {"CFPreferencesCopyMultiple",   hooked_CFPreferencesCopyMultiple,   (void **)&original_CFPreferencesCopyMultiple},
+            // POSIX 文件操作（6 个）— 拦截 MMKV/WCDB 等 C/C++ 库的直接文件 I/O
+            {"open",    hooked_open,    (void **)&original_open},
+            {"openat",  hooked_openat,  (void **)&original_openat},
+            {"stat",    hooked_stat,    (void **)&original_stat},
+            {"lstat",   hooked_lstat,   (void **)&original_lstat},
+            {"access",  hooked_access,  (void **)&original_access},
+            {"fopen",   hooked_fopen,   (void **)&original_fopen},
         };
         rebind_symbols(rebindings, sizeof(rebindings) / sizeof(struct rebinding));
-        NSLog(@"[DK] fishhook C 函数 Hook 已安装（13 个：Keychain 4 + CFPreferences 9）");
+        NSLog(@"[DK] fishhook C 函数 Hook 已安装（19 个：Keychain 4 + CFPreferences 9 + POSIX 6）");
 
         // ============================================
         // 第三步：关闭启动保护
@@ -832,6 +861,85 @@ didReceiveNotificationResponse:(UNNotificationResponse *)response
         [[DKNetworkSessionManager sharedManager] saveCurrentSession];
         NSLog(@"[DK] DK Multi-Account Tweak 已卸载");
     }
+}
+
+// ============================================================
+// POSIX 文件操作 C 函数 Hook 实现
+//
+// MMKV 使用 open() + mmap() 直接读写文件，WCDB/SQLCipher 等
+// C/C++ 库也直接使用 open()/stat()/access() 等 POSIX API。
+// 这些调用完全绕过 ObjC 层的 NSFileManager/NSData Hook。
+//
+// 即使 DKAppDataManager 的 rename() 搬移 Library/ 失败，
+// 这些 Hook 也能确保所有文件 I/O 被重定向到隔离目录，
+// 子账号不会读到默认账号的 MMKV/WCDB 数据。
+//
+// 路径映射逻辑内置于 DKRemapFilePath()，与 NSFileManager Hook
+// 共享同一套规则（DKIsStartupGuardActive + isSwitching + 默认账号检查）。
+// ============================================================
+
+/// 将 C 字符串路径通过 DKRemapFilePath 映射。
+/// 返回的 const char * 来自 NSString 的 fileSystemRepresentation，
+/// 其生命周期与 mappedPath 对象绑定（调用方栈帧内有效）。
+/// 若路径为 NULL、非 UTF-8 或无需映射，返回原指针。
+static const char *DKRemapCFilepath(const char *cPath, NSString * __strong *outHolder) {
+    if (!cPath) return NULL;
+    NSString *nsPath = [NSString stringWithUTF8String:cPath];
+    if (!nsPath) return cPath;
+    NSString *mapped = DKRemapFilePath(nsPath);
+    if (mapped == nsPath || [mapped isEqualToString:nsPath]) return cPath;
+    if (outHolder) *outHolder = mapped;
+    return [mapped fileSystemRepresentation];
+}
+
+static int hooked_open(const char *path, int flags, ...) {
+    NSString *holder = nil;
+    const char *mappedPath = DKRemapCFilepath(path, &holder);
+    if (flags & O_CREAT) {
+        va_list args;
+        va_start(args, flags);
+        mode_t mode = va_arg(args, int);
+        va_end(args);
+        return original_open(mappedPath, flags, mode);
+    }
+    return original_open(mappedPath, flags);
+}
+
+static int hooked_openat(int fd, const char *path, int flags, ...) {
+    NSString *holder = nil;
+    const char *mappedPath = DKRemapCFilepath(path, &holder);
+    if (flags & O_CREAT) {
+        va_list args;
+        va_start(args, flags);
+        mode_t mode = va_arg(args, int);
+        va_end(args);
+        return original_openat(fd, mappedPath, flags, mode);
+    }
+    return original_openat(fd, mappedPath, flags);
+}
+
+static int hooked_stat(const char *path, struct stat *buf) {
+    NSString *holder = nil;
+    const char *mappedPath = DKRemapCFilepath(path, &holder);
+    return original_stat(mappedPath, buf);
+}
+
+static int hooked_lstat(const char *path, struct stat *buf) {
+    NSString *holder = nil;
+    const char *mappedPath = DKRemapCFilepath(path, &holder);
+    return original_lstat(mappedPath, buf);
+}
+
+static int hooked_access(const char *path, int mode) {
+    NSString *holder = nil;
+    const char *mappedPath = DKRemapCFilepath(path, &holder);
+    return original_access(mappedPath, mode);
+}
+
+static FILE *hooked_fopen(const char *path, const char *mode) {
+    NSString *holder = nil;
+    const char *mappedPath = DKRemapCFilepath(path, &holder);
+    return original_fopen(mappedPath, mode);
 }
 
 // ============================================================

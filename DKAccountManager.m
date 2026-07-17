@@ -129,6 +129,11 @@ static NSString *_accountsRootPath = nil;
     if (error) {
         NSLog(@"[DK] 当前账号文件读取失败: %@", error);
     }
+    saved = [saved stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (saved.length == 0) {
+        NSLog(@"[DK] 当前账号文件内容为空（trim 后）");
+        return nil;
+    }
     NSLog(@"[DK] 当前账号文件内容: %@", saved);
     return saved;
 }
