@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.0.56] - 2026-07-17
+
+- 5d3d4db fix: reorder _currentAccountName assignment in switchToAccount handler
+
+
 ## [1.0.55] - 2026-07-17
 
 - 2d35d6b fix: re-apply session after restoring .default_backup to prevent stale token
