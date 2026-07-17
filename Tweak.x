@@ -123,6 +123,24 @@ static void hooked_CFPreferencesSetAppValue(CFStringRef key, CFPropertyListRef v
 static CFPropertyListRef hooked_CFPreferencesCopyAppValue(CFStringRef key, CFStringRef applicationID);
 static Boolean hooked_CFPreferencesAppSynchronize(CFStringRef applicationID);
 
+// CFPreferences 非 App 版本 Hook 前向声明
+// TTAccountSDK 可能直接调用 CFPreferencesSetValue（5 参数）而非
+// CFPreferencesSetAppValue（3 参数），绕过已 Hook 的 App 版本。
+// 非 App 版本的 applicationID 是可选的，SDK 可能传 NULL 或 kCFPreferencesCurrentApplication。
+static void (*original_CFPreferencesSetValue)(CFStringRef key, CFPropertyListRef value, CFStringRef applicationID, CFStringRef userName, CFStringRef hostName);
+static CFPropertyListRef (*original_CFPreferencesCopyValue)(CFStringRef key, CFStringRef applicationID, CFStringRef userName, CFStringRef hostName);
+static Boolean (*original_CFPreferencesSynchronize)(CFStringRef applicationID, CFStringRef userName, CFStringRef hostName);
+static CFArrayRef (*original_CFPreferencesCopyKeyList)(CFStringRef applicationID, CFStringRef userName, CFStringRef hostName);
+static void (*original_CFPreferencesSetMultiple)(CFDictionaryRef keysToSet, CFArrayRef keysToRemove, CFStringRef applicationID, CFStringRef userName, CFStringRef hostName);
+static CFDictionaryRef (*original_CFPreferencesCopyMultiple)(CFArrayRef keysToFetch, CFStringRef applicationID, CFStringRef userName, CFStringRef hostName);
+
+static void hooked_CFPreferencesSetValue(CFStringRef key, CFPropertyListRef value, CFStringRef applicationID, CFStringRef userName, CFStringRef hostName);
+static CFPropertyListRef hooked_CFPreferencesCopyValue(CFStringRef key, CFStringRef applicationID, CFStringRef userName, CFStringRef hostName);
+static Boolean hooked_CFPreferencesSynchronize(CFStringRef applicationID, CFStringRef userName, CFStringRef hostName);
+static CFArrayRef hooked_CFPreferencesCopyKeyList(CFStringRef applicationID, CFStringRef userName, CFStringRef hostName);
+static void hooked_CFPreferencesSetMultiple(CFDictionaryRef keysToSet, CFArrayRef keysToRemove, CFStringRef applicationID, CFStringRef userName, CFStringRef hostName);
+static CFDictionaryRef hooked_CFPreferencesCopyMultiple(CFArrayRef keysToFetch, CFStringRef applicationID, CFStringRef userName, CFStringRef hostName);
+
 // CFPreferences 隔离用 plist 路径
 // 与 NSUserDefaults Hook 共享同一个账号隔离 plist，
 // 避免 TRAE 直接调用 CFPreferences API 时数据落入不同文件，
@@ -971,10 +989,16 @@ didReceiveNotificationResponse:(UNNotificationResponse *)response
             {"SecItemCopyMatching",   hooked_SecItemCopyMatching,   (void **)&original_SecItemCopyMatching},
             {"SecItemUpdate",         hooked_SecItemUpdate,         (void **)&original_SecItemUpdate},
             {"SecItemDelete",         hooked_SecItemDelete,         (void **)&original_SecItemDelete},
-            // CFPreferences（3 个）
+            // CFPreferences（3 个 App 版本 + 6 个非 App 版本 = 9 个）
             {"CFPreferencesSetAppValue",    hooked_CFPreferencesSetAppValue,    (void **)&original_CFPreferencesSetAppValue},
             {"CFPreferencesCopyAppValue",   hooked_CFPreferencesCopyAppValue,   (void **)&original_CFPreferencesCopyAppValue},
             {"CFPreferencesAppSynchronize", hooked_CFPreferencesAppSynchronize, (void **)&original_CFPreferencesAppSynchronize},
+            {"CFPreferencesSetValue",       hooked_CFPreferencesSetValue,       (void **)&original_CFPreferencesSetValue},
+            {"CFPreferencesCopyValue",      hooked_CFPreferencesCopyValue,      (void **)&original_CFPreferencesCopyValue},
+            {"CFPreferencesSynchronize",    hooked_CFPreferencesSynchronize,    (void **)&original_CFPreferencesSynchronize},
+            {"CFPreferencesCopyKeyList",    hooked_CFPreferencesCopyKeyList,    (void **)&original_CFPreferencesCopyKeyList},
+            {"CFPreferencesSetMultiple",    hooked_CFPreferencesSetMultiple,    (void **)&original_CFPreferencesSetMultiple},
+            {"CFPreferencesCopyMultiple",   hooked_CFPreferencesCopyMultiple,   (void **)&original_CFPreferencesCopyMultiple},
             // POSIX 文件 I/O（5 个）— WCDB/MMKV 底层依赖
             {"fopen",   hooked_fopen,   (void **)&original_fopen},
             {"open",    hooked_open,    (void **)&original_open},
@@ -983,7 +1007,7 @@ didReceiveNotificationResponse:(UNNotificationResponse *)response
             {"openat",  hooked_openat,  (void **)&original_openat},
         };
         rebind_symbols(rebindings, sizeof(rebindings) / sizeof(struct rebinding));
-        NSLog(@"[DK] fishhook C 函数 Hook 已安装（12 个：Keychain 4 + CFPreferences 3 + POSIX 5）");
+        NSLog(@"[DK] fishhook C 函数 Hook 已安装（18 个：Keychain 4 + CFPreferences 9 + POSIX 5）");
 
         // ============================================
         // 第三步：关闭启动保护
@@ -1310,4 +1334,126 @@ static Boolean hooked_CFPreferencesAppSynchronize(CFStringRef applicationID) {
         return true;
     }
     return original_CFPreferencesAppSynchronize(applicationID);
+}
+
+// ============================================================
+// CFPreferences 非 App 版本 Hook 实现
+// SetValue/CopyValue/Synchronize/CopyKeyList 是 CFPreferences 的底层 API，
+// 允许调用方指定 userName 和 hostName。TTAccountSDK 可能直接调用这些
+// 函数而非 App 版本（SetAppValue/CopyAppValue/AppSynchronize），
+// 从而绕过已 Hook 的 3 个 App 版本。
+//
+// 这些 Hook 与 App 版本共享同一隔离 plist（DKCFPreferencesPlistPath），
+// 确保所有 CFPreferences 写入都落在同一文件。
+// ============================================================
+
+static void hooked_CFPreferencesSetValue(CFStringRef key, CFPropertyListRef value,
+                                          CFStringRef applicationID, CFStringRef userName, CFStringRef hostName) {
+    if (_dkStartupGuard) {
+        original_CFPreferencesSetValue(key, value, applicationID, userName, hostName);
+        return;
+    }
+    NSMutableDictionary *dict = DKCFPreferencesLoad();
+    if (dict) {
+        // 非默认账号：写入独立 plist
+        NSString *nsKey = (__bridge NSString *)key;
+        if (value) {
+            dict[nsKey] = (__bridge id)value;
+        } else {
+            [dict removeObjectForKey:nsKey];
+        }
+        DKCFPreferencesSave(dict);
+    } else {
+        // 默认账号：走原始逻辑
+        original_CFPreferencesSetValue(key, value, applicationID, userName, hostName);
+    }
+}
+
+static CFPropertyListRef hooked_CFPreferencesCopyValue(CFStringRef key,
+                                                        CFStringRef applicationID, CFStringRef userName, CFStringRef hostName) {
+    if (_dkStartupGuard) return original_CFPreferencesCopyValue(key, applicationID, userName, hostName);
+    NSMutableDictionary *dict = DKCFPreferencesLoad();
+    if (dict) {
+        // 非默认账号：从独立 plist 读取
+        NSString *nsKey = (__bridge NSString *)key;
+        id value = dict[nsKey];
+        if (value) {
+            CFRetain((__bridge CFTypeRef)value);
+            return (__bridge CFPropertyListRef)value;
+        }
+        return NULL;
+    }
+    // 默认账号：走原始逻辑
+    return original_CFPreferencesCopyValue(key, applicationID, userName, hostName);
+}
+
+static Boolean hooked_CFPreferencesSynchronize(CFStringRef applicationID,
+                                                CFStringRef userName, CFStringRef hostName) {
+    if (_dkStartupGuard) return original_CFPreferencesSynchronize(applicationID, userName, hostName);
+    NSMutableDictionary *dict = DKCFPreferencesLoad();
+    if (dict) {
+        // 非默认账号：plist 已在写入时同步，直接返回 true
+        return true;
+    }
+    return original_CFPreferencesSynchronize(applicationID, userName, hostName);
+}
+
+static CFArrayRef hooked_CFPreferencesCopyKeyList(CFStringRef applicationID,
+                                                   CFStringRef userName, CFStringRef hostName) {
+    if (_dkStartupGuard) return original_CFPreferencesCopyKeyList(applicationID, userName, hostName);
+    NSMutableDictionary *dict = DKCFPreferencesLoad();
+    if (dict) {
+        // 非默认账号：从独立 plist 读取所有 key
+        NSArray *keys = [dict allKeys];
+        CFArrayRef result = (__bridge CFArrayRef)keys;
+        CFRetain(result);
+        return result;
+    }
+    return original_CFPreferencesCopyKeyList(applicationID, userName, hostName);
+}
+
+static void hooked_CFPreferencesSetMultiple(CFDictionaryRef keysToSet, CFArrayRef keysToRemove,
+                                             CFStringRef applicationID, CFStringRef userName, CFStringRef hostName) {
+    if (_dkStartupGuard) {
+        original_CFPreferencesSetMultiple(keysToSet, keysToRemove, applicationID, userName, hostName);
+        return;
+    }
+    NSMutableDictionary *dict = DKCFPreferencesLoad();
+    if (dict) {
+        // 非默认账号：写入独立 plist
+        if (keysToSet) {
+            NSDictionary *nsDict = (__bridge NSDictionary *)keysToSet;
+            [dict addEntriesFromDictionary:nsDict];
+        }
+        if (keysToRemove) {
+            NSArray *nsKeys = (__bridge NSArray *)keysToRemove;
+            for (NSString *key in nsKeys) {
+                [dict removeObjectForKey:key];
+            }
+        }
+        DKCFPreferencesSave(dict);
+    } else {
+        original_CFPreferencesSetMultiple(keysToSet, keysToRemove, applicationID, userName, hostName);
+    }
+}
+
+static CFDictionaryRef hooked_CFPreferencesCopyMultiple(CFArrayRef keysToFetch,
+                                                         CFStringRef applicationID, CFStringRef userName, CFStringRef hostName) {
+    if (_dkStartupGuard) return original_CFPreferencesCopyMultiple(keysToFetch, applicationID, userName, hostName);
+    NSMutableDictionary *dict = DKCFPreferencesLoad();
+    if (dict) {
+        // 非默认账号：从独立 plist 批量读取
+        NSArray *nsKeys = (__bridge NSArray *)keysToFetch;
+        NSMutableDictionary *result = [NSMutableDictionary dictionary];
+        for (NSString *key in nsKeys) {
+            id value = dict[key];
+            if (value) {
+                result[key] = value;
+            }
+        }
+        CFDictionaryRef cfResult = (__bridge CFDictionaryRef)result;
+        CFRetain(cfResult);
+        return cfResult;
+    }
+    return original_CFPreferencesCopyMultiple(keysToFetch, applicationID, userName, hostName);
 }
