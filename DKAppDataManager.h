@@ -38,4 +38,11 @@
 /// 清理账号的备份数据
 - (void)clearBackupForAccount:(NSString *)accountName;
 
+/// 启动时调用：确保沙盒中的数据与当前账号匹配。
+/// 如果不匹配，自动搬移旧数据到对应账号备份，并恢复当前账号数据。
+/// @param currentAccount 当前活跃账号名
+/// @param designatedDefault 指定默认账号名（可为 nil）
+- (void)ensureDataOwnershipForAccount:(NSString *)currentAccount
+                    designatedDefault:(NSString *)designatedDefault;
+
 @end

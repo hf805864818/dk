@@ -5,20 +5,18 @@
 // ============================================================
 // DKAppDataManager 实现
 //
-// 使用 rename() 做原子级目录搬移，原因：
-//   1. rename() 是原子操作，只改目录项，不复制数据
-//   2. 即使文件正在被 mmap，rename() 也不影响已有映射
-//      （内核通过 inode 跟踪文件，rename 不改 inode）
+// 使用 rename() 做子目录级搬移，原因：
+//   1. 整目录 rename() 在 iOS 上可能因沙盒限制失败
+//   2. 子目录 rename() 只改目录项，不碰文件数据，即使文件正在被 mmap 也能成功
 //   3. 搬移完成后 exit(0)，应用重启后文件在新位置
+//
+// 数据所有权标记：
+//   在 Library/ 根目录写入 .dk_library_owner 文件，标记当前沙盒中
+//   数据属于哪个账号。启动时检测到不匹配则自动恢复。
 //
 // 只搬移 Library/（不搬移 Documents/），因为：
 //   - Library/ 包含 MMKV/WCDB/Preferences/Cookies 等所有关键数据
 //   - Documents/ 包含 DKAccounts/ 备份目录自身，搬移会形成递归
-//
-// 与 Crane 的对比：
-//   Crane 在 containermanagerd 守护进程中搬移容器目录，
-//   我们直接在应用进程内搬移 Library/。
-//   效果相同——都是让应用在原始路径下访问目标账号的数据。
 // ============================================================
 
 @implementation DKAppDataManager
@@ -55,17 +53,17 @@
 
 #pragma mark - 核心搬移逻辑
 
-/// 安全搬移目录：将 srcDir 搬移到 dstDir
+/// 安全搬移目录：将 srcDir 的内容搬移到 dstDir
 ///
-/// 核心策略：使用 rename() 原子交换，避免删除活跃目录（活跃目录中的文件可能被 mmap 占用，
-/// removeItemAtPath 会失败）。rename() 只改目录项/inode 指针，不碰文件数据，
+/// 核心策略：不使用整目录 rename()（iOS 上 Library/ 可能因包含 mmap 文件而失败），
+/// 而是逐个子目录搬移。rename() 只改目录项/inode 指针，不碰文件数据，
 /// 即使文件正在被 mmap 也能成功。
 ///
 /// 流程：
-///   1. 如果 dstDir 不存在 → 直接 rename(srcDir → dstDir)
-///   2. 如果 dstDir 存在 → rename(dstDir → dstDir.tmp)，rename(srcDir → dstDir)，删除 dstDir.tmp
-///   3. 如果 srcDir 不存在 → 创建空 dstDir
-///   4. 如果 rename 失败 → 逐个子目录搬移兜底
+///   1. 逐个子目录 rename(srcDir/item → dstDir/item)
+///   2. 失败的子目录用 moveItemAtPath 兜底
+///   3. 仍失败的子目录用 copyItemAtPath + removeItemAtPath 兜底
+///   4. 始终返回 YES（部分失败不阻塞整体流程）
 - (BOOL)_moveDirectory:(NSString *)srcDir toDirectory:(NSString *)dstDir {
     NSFileManager *fm = [NSFileManager defaultManager];
     NSError *error = nil;
@@ -97,58 +95,14 @@
         return YES;
     }
 
-    const char *srcPath = [srcDir fileSystemRepresentation];
-    const char *dstPath = [dstDir fileSystemRepresentation];
-
-    BOOL dstExists = [fm fileExistsAtPath:dstDir];
-
-    if (!dstExists) {
-        // 目标不存在：直接 rename 即可
-        if (rename(srcPath, dstPath) == 0) {
-            NSLog(@"[DK] rename 直接成功: %@ → %@", srcDir, dstDir);
-            return YES;
-        }
-        NSLog(@"[DK] rename 直接失败 (errno=%d), 尝试 moveItemAtPath: %@ → %@",
-              errno, srcDir, dstDir);
-    } else {
-        // 目标已存在：用 rename 做原子交换
-        // 1. rename(dstDir → dstDir.tmp)  — 把旧目标挪开
-        // 2. rename(srcDir → dstDir)     — 把新数据放进来
-        // 3. 删除 dstDir.tmp              — 清理
-        NSString *tmpDir = [dstDir stringByAppendingString:@".tmp"];
-        const char *tmpPath = [tmpDir fileSystemRepresentation];
-
-        // 先清理可能残留的 tmp 目录
-        if ([fm fileExistsAtPath:tmpDir]) {
-            [fm removeItemAtPath:tmpDir error:nil];
-        }
-
-        if (rename(dstPath, tmpPath) == 0) {
-            NSLog(@"[DK] 已把旧目标挪到 .tmp: %@", dstDir);
-            if (rename(srcPath, dstPath) == 0) {
-                NSLog(@"[DK] rename 交换成功: %@ → %@", srcDir, dstDir);
-                // 异步清理 tmp 目录（删除可能慢，先返回成功）
-                dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0), ^{
-                    [[NSFileManager defaultManager] removeItemAtPath:tmpDir error:nil];
-                    NSLog(@"[DK] .tmp 目录已清理: %@", tmpDir);
-                });
-                return YES;
-            } else {
-                // 恢复：把旧目标挪回来
-                NSLog(@"[DK] rename 第二步失败 (errno=%d), 回退", errno);
-                rename(tmpPath, dstPath);
-            }
-        } else {
-            NSLog(@"[DK] rename 第一步失败 (errno=%d): 无法把旧目标挪开", errno);
-        }
-    }
-
-    // 兜底：逐个子目录搬移
-    NSLog(@"[DK] rename 方案失败, 尝试逐个子目录搬移: %@ → %@", srcDir, dstDir);
+    // 直接逐个子目录搬移，跳过整目录 rename
+    // iOS 上整目录 rename 因沙盒限制大概率失败
     return [self _moveSubdirectories:srcDir toDirectory:dstDir];
 }
 
-/// 逐个子目录搬移（兜底方案）
+/// 逐个子目录搬移
+/// 始终返回 YES —— 个别子目录搬移失败不阻塞整体流程。
+/// 失败的子目录会被记录日志但不会导致账号切换失败。
 - (BOOL)_moveSubdirectories:(NSString *)srcDir toDirectory:(NSString *)dstDir {
     NSFileManager *fm = [NSFileManager defaultManager];
     NSError *error = nil;
@@ -161,10 +115,10 @@
     NSArray *contents = [fm contentsOfDirectoryAtPath:srcDir error:&error];
     if (error) {
         NSLog(@"[DK] 列出源目录内容失败: %@", error);
-        return NO;
+        // 即使列出失败也返回 YES，不阻塞整体流程
+        return YES;
     }
 
-    BOOL allSuccess = YES;
     for (NSString *item in contents) {
         // 跳过 DKAccounts 自身（在 Documents/ 下的子目录中可能出现）
         if ([item isEqualToString:@"DKAccounts"]) {
@@ -175,7 +129,18 @@
         NSString *srcItem = [srcDir stringByAppendingPathComponent:item];
         NSString *dstItem = [dstDir stringByAppendingPathComponent:item];
 
-        // 先尝试 rename（最快）
+        // 如果目标子目录已存在，先移到 .tmp 再重试
+        if ([fm fileExistsAtPath:dstItem]) {
+            NSString *tmpItem = [dstItem stringByAppendingString:@".tmp"];
+            [fm removeItemAtPath:tmpItem error:nil];
+            rename([dstItem fileSystemRepresentation], [tmpItem fileSystemRepresentation]);
+            // 异步清理 tmp
+            dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0), ^{
+                [[NSFileManager defaultManager] removeItemAtPath:tmpItem error:nil];
+            });
+        }
+
+        // 先尝试 rename（最快，只改目录项）
         if (rename([srcItem fileSystemRepresentation], [dstItem fileSystemRepresentation]) == 0) {
             NSLog(@"[DK]   ✅ %@ (rename)", item);
             continue;
@@ -194,8 +159,8 @@
             continue;
         }
 
-        NSLog(@"[DK]   ❌ %@: %@", item, error);
-        allSuccess = NO;
+        // 三层都失败，记录日志但不阻塞
+        NSLog(@"[DK]   ⚠️ %@ 搬移失败（跳过）: %@", item, error);
     }
 
     // 清理源目录（如果为空）
@@ -206,7 +171,8 @@
         NSLog(@"[DK] 源目录仍有 %lu 项未搬移: %@", (unsigned long)remaining.count, remaining);
     }
 
-    return allSuccess;
+    // 始终返回 YES，不因个别失败阻塞
+    return YES;
 }
 
 #pragma mark - 公开接口
@@ -272,19 +238,22 @@
     // 如果备份不存在（新账号），创建空目录结构即可
     if (![[NSFileManager defaultManager] fileExistsAtPath:srcLibrary]) {
         NSLog(@"[DK] 账号 %@ 无备份数据（新账号），创建空目录", accountName);
-        // 用 rename 把旧 Library 挪开，再创建新的空 Library
-        NSString *oldLibrary = [appHome stringByAppendingPathComponent:@"Library.old"];
-        const char *oldPath = [oldLibrary fileSystemRepresentation];
-        const char *dstPath = [dstLibrary fileSystemRepresentation];
 
-        // 清理可能残留的 .old 目录
-        if ([[NSFileManager defaultManager] fileExistsAtPath:oldLibrary]) {
-            [[NSFileManager defaultManager] removeItemAtPath:oldLibrary error:nil];
-        }
-
-        // 把旧 Library 挪到 .old（不删除，用 rename 避免文件被占用的问题）
+        // 把旧 Library 的内容搬移到临时目录（不删除，用 rename 避免文件被占用的问题）
+        // 使用 _moveSubdirectories 而非单次 rename，更可靠
         if ([[NSFileManager defaultManager] fileExistsAtPath:dstLibrary]) {
-            rename(dstPath, oldPath);
+            NSString *oldLibrary = [appHome stringByAppendingPathComponent:@"Library.old"];
+            // 清理可能残留的 .old 目录
+            if ([[NSFileManager defaultManager] fileExistsAtPath:oldLibrary]) {
+                // 先尝试 rename 到 .old.1，如果也失败则不管
+                NSString *olderLibrary = [appHome stringByAppendingPathComponent:@"Library.old.1"];
+                [[NSFileManager defaultManager] removeItemAtPath:olderLibrary error:nil];
+                rename([oldLibrary fileSystemRepresentation], [olderLibrary fileSystemRepresentation]);
+            }
+            // 把旧 Library 的子目录逐一搬移到 .old
+            [self _moveSubdirectories:dstLibrary toDirectory:oldLibrary];
+            // 清理残留的 Library 目录（如果为空）
+            [[NSFileManager defaultManager] removeItemAtPath:dstLibrary error:nil];
         }
 
         NSFileManager *fm = [NSFileManager defaultManager];
@@ -301,9 +270,13 @@
         }
         // 异步清理 .old
         dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0), ^{
-            [[NSFileManager defaultManager] removeItemAtPath:oldLibrary error:nil];
+            NSString *oldLib = [appHome stringByAppendingPathComponent:@"Library.old"];
+            [[NSFileManager defaultManager] removeItemAtPath:oldLib error:nil];
+            NSString *olderLib = [appHome stringByAppendingPathComponent:@"Library.old.1"];
+            [[NSFileManager defaultManager] removeItemAtPath:olderLib error:nil];
         });
         NSLog(@"[DK] 新账号空目录已创建");
+        [self _writeLibraryOwner:accountName];
         return YES;
     }
 
@@ -323,6 +296,7 @@
     }
 
     NSLog(@"[DK] 账号数据搬移完成");
+    [self _writeLibraryOwner:accountName];
     return YES;
 }
 
@@ -336,6 +310,67 @@
     NSString *backupRoot = [self backupRootPathForAccount:accountName];
     [[NSFileManager defaultManager] removeItemAtPath:backupRoot error:nil];
     NSLog(@"[DK] 已清理账号 %@ 的备份数据", accountName);
+}
+
+#pragma mark - 数据所有权标记
+
+static NSString *const kDKLibraryOwnerFile = @".dk_library_owner";
+
+- (void)_writeLibraryOwner:(NSString *)accountName {
+    NSString *ownerPath = [[self appHomePath] stringByAppendingPathComponent:
+                           [NSString stringWithFormat:@"Library/%@", kDKLibraryOwnerFile]];
+    [accountName writeToFile:ownerPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    NSLog(@"[DK] 写入 Library 所有权标记: %@", accountName);
+}
+
+- (NSString *)_readLibraryOwner {
+    NSString *ownerPath = [[self appHomePath] stringByAppendingPathComponent:
+                           [NSString stringWithFormat:@"Library/%@", kDKLibraryOwnerFile]];
+    if (![[NSFileManager defaultManager] fileExistsAtPath:ownerPath]) {
+        return nil;
+    }
+    NSString *name = [NSString stringWithContentsOfFile:ownerPath encoding:NSUTF8StringEncoding error:nil];
+    return [name stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+}
+
+- (void)ensureDataOwnershipForAccount:(NSString *)currentAccount
+                    designatedDefault:(NSString *)designatedDefault {
+    // 默认账号 + 无指定默认 → 不需要检查
+    NSString *defaultAccount = [[DKAccountManager sharedManager] defaultAccountName];
+    if ([currentAccount isEqualToString:defaultAccount] && !designatedDefault) {
+        return;
+    }
+
+    // 指定默认账号 → 等同于默认账号，不需要检查
+    if (designatedDefault && [currentAccount isEqualToString:designatedDefault]) {
+        [self _writeLibraryOwner:currentAccount];
+        return;
+    }
+
+    NSString *owner = [self _readLibraryOwner];
+    NSLog(@"[DK] 启动时数据所有权检查: 当前账号=%@, Library所有者=%@", currentAccount, owner ?: @"无");
+
+    // 如果所有权标记匹配，一切正常
+    if (owner && [owner isEqualToString:currentAccount]) {
+        NSLog(@"[DK] 数据所有权匹配，无需恢复");
+        return;
+    }
+
+    // 所有权不匹配：需要交换数据
+    // 1. 将当前 Library 数据搬移到旧所有者（或默认账号）的备份
+    NSString *oldOwner = owner ?: defaultAccount;
+    NSLog(@"[DK] 数据所有权不匹配，搬移当前数据到「%@」备份", oldOwner);
+    [self moveAppDataToAccount:oldOwner];
+
+    // 2. 将当前账号数据从备份恢复到沙盒
+    if ([self hasBackupForAccount:currentAccount]) {
+        NSLog(@"[DK] 从备份恢复「%@」的数据", currentAccount);
+        [self moveAccountDataToApp:currentAccount];
+    } else {
+        // 新账号无备份，创建空目录
+        NSLog(@"[DK] 「%@」无备份数据，创建空目录", currentAccount);
+        [self moveAccountDataToApp:currentAccount]; // 新账号分支会自动创建空目录
+    }
 }
 
 @end

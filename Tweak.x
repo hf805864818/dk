@@ -677,16 +677,15 @@ didReceiveNotificationResponse:(UNNotificationResponse *)response
         NSString *defaultAccount = [[DKAccountManager sharedManager] defaultAccountName];
         NSString *designatedDefault = [[DKAccountManager sharedManager] designatedDefaultAccountName];
 
-        // 如果指定了默认账号且沙盒为空（插件刚更新/重装），
-        // 从备份恢复指定默认账号的数据到沙盒
-        if (designatedDefault) {
-            NSString *appLibrary = [NSHomeDirectory() stringByAppendingPathComponent:@"Library"];
-            NSArray *libContents = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:appLibrary error:nil];
-            if (libContents.count == 0) {
-                NSLog(@"[DK] 沙盒 Library/ 为空，从备份恢复指定默认账号「%@」", designatedDefault);
-                [[DKAppDataManager sharedManager] moveAccountDataToApp:designatedDefault];
-            }
-        }
+        // ============================================
+        // 启动时自动修复数据所有权：
+        // 如果沙盒中 Library/ 的数据不属于当前账号（例如上次切换时
+        // 目录搬移失败），自动将旧数据搬移到对应账号备份，
+        // 并恢复当前账号数据。
+        // 这解决了"添加B后进入软件还是默认账号信息"的问题。
+        // ============================================
+        [[DKAppDataManager sharedManager] ensureDataOwnershipForAccount:currentAccount
+                                                      designatedDefault:designatedDefault];
 
         // 指定默认账号使用 NSHomeDirectory()，等同于原始默认账号，
         // 不需要清空 NSUserDefaults
