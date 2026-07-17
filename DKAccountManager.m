@@ -450,7 +450,8 @@ static NSString *_accountsRootPath = nil;
                                                                     preferredStyle:UIAlertControllerStyleAlert];
             [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
                 // ============================================================
-                // 在 exit(0) 之前完成所有状态切换（此时用户已确认，不会回退）
+                // 在 exit(0) 之前完成状态切换（此时用户已确认，不会回退）
+                // 目录数据搬移在下次启动的 %ctor 中完成（App 未初始化时 rename 可靠）
                 // ============================================================
 
                 // 切换 _currentAccountName
@@ -460,7 +461,6 @@ static NSString *_accountsRootPath = nil;
                 [self saveCurrentState];
 
                 // 恢复目标账号的网络会话
-                // isSwitching 此时为 NO，非默认账号恢复到自己的隔离存储。
                 if ([name isEqualToString:kDKDefaultAccountName]) {
                     [[DKNetworkSessionManager sharedManager] restoreDefaultAccountKeychain];
                 }
@@ -470,81 +470,20 @@ static NSString *_accountsRootPath = nil;
                 // 通知数据隔离层刷新
                 [[DKDataIsolation sharedInstance] setup];
 
-                // ============================================================
-                // 目录级数据搬移（借鉴 Crane 容器级隔离思路）
-                // 将当前 App 沙盒的 Library/ 搬移到旧账号备份，
-                // 再将目标账号的备份搬移回 App 沙盒。
-                // 这能捕获 MMKV、WCDB 等绕过 API Hook 的 C++ 存储引擎数据。
-                // ============================================================
-                if (![oldAccount isEqualToString:name]) {
-                    // 1. 将当前 App 数据搬移到旧账号备份
-                    BOOL moveSuccess = [[DKAppDataManager sharedManager] moveAppDataToAccount:oldAccount];
-                    if (!moveSuccess) {
-                        // 搬移失败，恢复旧账号名并提示用户
-                        NSLog(@"[DK] ❌ 数据搬移失败，回退账号切换");
-                        _currentAccountName = oldAccount;
-                        [self saveCurrentState];
-                        // 切回旧账号，不退出
-                        dispatch_async(dispatch_get_main_queue(), ^{
-                            UIAlertController *failAlert = [UIAlertController
-                                alertControllerWithTitle:@"切换失败"
-                                message:@"数据搬移失败，请尝试关闭应用后重试"
-                                preferredStyle:UIAlertControllerStyleAlert];
-                            [failAlert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
-                            UIViewController *rootVC = [self _rootViewController];
-                            if (rootVC) {
-                                [rootVC presentViewController:failAlert animated:YES completion:nil];
-                            }
-                        });
-                        return;
-                    }
-                    NSLog(@"[DK] ✅ 旧账号「%@」数据已备份", oldAccount);
-
-                    // 2. 将目标账号数据搬移回 App 沙盒
-                    // 新账号无备份时，moveAccountDataToApp 创建空目录并返回 YES
-                    BOOL restoreSuccess = [[DKAppDataManager sharedManager] moveAccountDataToApp:name];
-                    if (!restoreSuccess) {
-                        NSLog(@"[DK] ❌ 目标账号数据恢复失败，回退");
-                        // 尝试从旧账号恢复
-                        [[DKAppDataManager sharedManager] moveAccountDataToApp:oldAccount];
-                        _currentAccountName = oldAccount;
-                        [self saveCurrentState];
-                        dispatch_async(dispatch_get_main_queue(), ^{
-                            UIAlertController *failAlert = [UIAlertController
-                                alertControllerWithTitle:@"切换失败"
-                                message:@"目标账号数据恢复失败，已回退"
-                                preferredStyle:UIAlertControllerStyleAlert];
-                            [failAlert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
-                            UIViewController *rootVC = [self _rootViewController];
-                            if (rootVC) {
-                                [rootVC presentViewController:failAlert animated:YES completion:nil];
-                            }
-                        });
-                        return;
-                    }
-                    NSLog(@"[DK] ✅ 目标账号「%@」数据已恢复", name);
-                }
-
                 // 发送账号切换通知
                 [[NSNotificationCenter defaultCenter] postNotificationName:@"DKAccountDidChangeNotification"
                                                                     object:nil
                                                                   userInfo:@{@"oldAccount": oldAccount ?: @"",
                                                                              @"newAccount": name}];
 
-                NSLog(@"[DK] 账号切换完成: %@ -> %@，即将退出应用", oldAccount, name);
+                NSLog(@"[DK] 账号切换完成: %@ -> %@，即将退出应用（目录搬移将在下次启动时完成）", oldAccount, name);
 
-                // 在退出前同步 NSUserDefaults
+                // 退出前同步 NSUserDefaults
                 [[NSUserDefaults standardUserDefaults] synchronize];
 
-                // 延迟退出让 RunLoop 有机会处理异步操作（Cookie 持久化等），
-                // 延迟结束后再次 sync() 刷新所有文件系统缓冲区再退出
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
                                dispatch_get_main_queue(), ^{
-                    // 退出前再次强制刷新所有数据到磁盘。
-                    // sync() 放在这里（而非 dispatch_after 之前），确保
-                    // 0.5s 延迟期间的任何异步写入也被刷盘。
                     sync();
-                    // 退出应用，让用户重新打开后以新账号运行
                     exit(0);
                 });
             }]];
