@@ -698,22 +698,30 @@ didReceiveNotificationResponse:(UNNotificationResponse *)response
               [[DKAccountManager sharedManager] accountsRootPath]);
 
         if (isNonDefaultAccount) {
-            // 子账号启动：清空原始 NSUserDefaults 域，确保 App 看不到默认账号的登录态。
-            // 注意：这里只清空，不再把 savedDefaultDomain 写回原始域。
-            // 之前写回默认账号数据会导致子账号与默认账号状态混杂，
-            // 切回默认时 TRAE 可能检测到不一致而清除登录态。
+            // 子账号启动：无条件清空原始 NSUserDefaults 域。
+            //
+            // 关键：ensureDataOwnershipForAccount 已经把 Library/ 搬走并创建了空目录，
+            // persistentDomainForName: 在此刻返回 nil（空 plist 无数据），
+            // 但 cfprefsd 守护进程可能仍缓存着旧进程的域数据。
+            //
+            // 必须无条件调用 removePersistentDomainForName: +
+            // CFPreferencesAppSynchronize + synchronize 来强制 cfprefsd 清空缓存。
+            // 不能依赖 "if (savedDefaultDomain)" — 那会跳过清理。
             NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-            NSDictionary *savedDefaultDomain = [defaults persistentDomainForName:bundleID];
 
-            if (savedDefaultDomain) {
-                // 清空原始域 — 内存 + 磁盘 plist 全部清除
-                [defaults removePersistentDomainForName:bundleID];
-                [defaults synchronize];
-                NSLog(@"[DK] 子账号启动：已清空原始 NSUserDefaults（%lu 个键），App 将显示登录页",
-                      (unsigned long)savedDefaultDomain.count);
-            } else {
-                NSLog(@"[DK] 子账号启动：原始 NSUserDefaults 域为空，无需清空");
-            }
+            // 1. 强制 cfprefsd 从磁盘同步（确保看到空 plist）
+            CFPreferencesAppSynchronize((__bridge CFStringRef)bundleID);
+
+            // 2. 无条件清空域（内存中的缓存 + 通知 cfprefsd 删除）
+            [defaults removePersistentDomainForName:bundleID];
+
+            // 3. 同步到磁盘
+            [defaults synchronize];
+
+            // 4. 再次强制 cfprefsd 同步（确保清空操作生效）
+            CFPreferencesAppSynchronize((__bridge CFStringRef)bundleID);
+
+            NSLog(@"[DK] 子账号启动：已无条件清空原始 NSUserDefaults 域");
         }
 
         NSLog(@"[DK] 立即安装模式：Hook 将在 App 初始化前全部安装完毕");
