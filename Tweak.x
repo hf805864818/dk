@@ -47,6 +47,14 @@ static NSString* DKGetCurrentBundleID(void) {
 }
 
 // ============================================================
+// Keychain Hook 函数声明（实现在 DKKeychainHook.m 中）
+// ============================================================
+extern NSDictionary* DKRemapKeychainQuery(NSDictionary *query);
+extern NSDictionary* DKRemapKeychainAttributes(NSDictionary *attributes);
+extern NSDictionary* DKUnmapKeychainResult(NSDictionary *result);
+extern BOOL DKKeychainResultMatchesCurrentAccount(NSDictionary *result);
+
+// ============================================================
 // 公开版本号获取函数（可在任意模块中调用）
 // ============================================================
 NSString* DKGetVersion(void) {
