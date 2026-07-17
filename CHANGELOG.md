@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.0.48] - 2026-07-17
+
+- a8cdabc 关键修复: 非默认账号无条件清空 NSUserDefaults + 强制 cfprefsd 同步
+
+
 ## [1.0.47] - 2026-07-17
 
 - 9ff1c24 根本修复: 目录搬移从 exit(0) 前移到 %ctor 启动时
