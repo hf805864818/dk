@@ -13,6 +13,7 @@ static NSString *const kDKAccountsKey = @"DK_Accounts_List";
 static NSString *const kDKCurrentAccountKey = @"DK_Current_Account";
 static NSString *const kDKDefaultAccountName = @"__DK_DEFAULT__";
 static NSString *const kDKCurrentAccountFile = @".dk_current_account";
+static NSString *const kDKDesignatedDefaultFile = @".dk_designated_default";
 
 // ============================================================
 // 内部存储 — 使用 App Group 级别共享存储
@@ -22,6 +23,7 @@ static NSString *_accountsRootPath = nil;
 @implementation DKAccountManager {
     NSMutableArray<NSString *> *_accountNames;
     NSString *_currentAccountName;
+    NSString *_designatedDefaultAccountName;
     NSMutableDictionary<NSString *, NSDictionary *> *_metadataCache;
 }
 
@@ -40,6 +42,7 @@ static NSString *_accountsRootPath = nil;
         _accountNames = [NSMutableArray array];
         _metadataCache = [NSMutableDictionary dictionary];
         _currentAccountName = kDKDefaultAccountName;
+        _designatedDefaultAccountName = nil;
         _isSwitching = NO;
     }
     return self;
@@ -68,6 +71,30 @@ static NSString *_accountsRootPath = nil;
 
 - (NSString *)_currentAccountFilePath {
     return [self.accountsRootPath stringByAppendingPathComponent:kDKCurrentAccountFile];
+}
+
+- (NSString *)_designatedDefaultFilePath {
+    return [self.accountsRootPath stringByAppendingPathComponent:kDKDesignatedDefaultFile];
+}
+
+- (NSString *)_loadDesignatedDefault {
+    NSString *path = [self _designatedDefaultFilePath];
+    if (![[NSFileManager defaultManager] fileExistsAtPath:path]) {
+        return nil;
+    }
+    NSString *name = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
+    name = [name stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (name.length == 0) return nil;
+    return name;
+}
+
+- (void)_saveDesignatedDefault:(NSString *)accountName {
+    NSString *path = [self _designatedDefaultFilePath];
+    if (accountName) {
+        [accountName writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    } else {
+        [[NSFileManager defaultManager] removeItemAtPath:path error:nil];
+    }
 }
 
 - (void)_saveCurrentAccountToFile:(NSString *)accountName {
@@ -109,6 +136,11 @@ static NSString *_accountsRootPath = nil;
 - (NSString *)dataPathForAccount:(NSString *)accountName {
     if ([accountName isEqualToString:kDKDefaultAccountName]) {
         // 默认账号使用原始沙盒路径
+        return NSHomeDirectory();
+    }
+    // 如果此账号被指定为默认，也使用原始沙盒路径
+    if (_designatedDefaultAccountName &&
+        [accountName isEqualToString:_designatedDefaultAccountName]) {
         return NSHomeDirectory();
     }
     return [self.accountsRootPath stringByAppendingPathComponent:accountName];
@@ -162,6 +194,12 @@ static NSString *_accountsRootPath = nil;
     // 重要：先临时设为默认账号，这样 NSUserDefaults Hook 的 objectForKey 走 %orig，
     // 读取原始 NSUserDefaults（而非某个账号的独立 plist），确保读到正确的保存状态
     _currentAccountName = kDKDefaultAccountName;
+
+    // 加载指定默认账号（如果有）
+    _designatedDefaultAccountName = [self _loadDesignatedDefault];
+    if (_designatedDefaultAccountName) {
+        NSLog(@"[DK] refreshAccountList: 指定默认账号=%@", _designatedDefaultAccountName);
+    }
 
     // 优先读取独立文件中的当前账号标记。
     // exit(0) 前 cfprefsd 可能尚未把 NSUserDefaults 写入磁盘，导致状态丢失。
@@ -621,6 +659,127 @@ static NSString *_accountsRootPath = nil;
 
         CFRelease(result);
     }
+}
+
+- (void)promptSetDesignatedDefault {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        NSString *currentAccount = _currentAccountName;
+        NSString *defaultAccount = kDKDefaultAccountName;
+
+        // 如果当前就是默认账号，无需操作
+        if ([currentAccount isEqualToString:defaultAccount] &&
+            !_designatedDefaultAccountName) {
+            [self _showToast:@"当前已是默认账号"];
+            return;
+        }
+
+        NSString *title = @"设为默认账号";
+        NSString *message = [NSString stringWithFormat:
+            @"将当前账号「%@」设为默认账号？\n\n"
+            @"设定后，该账号数据将直接使用应用原始沙盒路径。\n"
+            @"更新插件后无需重新登录此账号。\n\n"
+            @"原默认账号数据会保留在备份中，可随时切换回去。",
+            currentAccount];
+
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:title
+                                                                       message:message
+                                                                preferredStyle:UIAlertControllerStyleAlert];
+
+        [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+
+        [alert addAction:[UIAlertAction actionWithTitle:@"设为默认" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+            // 保存指定默认账号标记
+            [self _saveDesignatedDefault:currentAccount];
+            _designatedDefaultAccountName = currentAccount;
+
+            // 保存当前状态
+            [self saveCurrentState];
+
+            NSLog(@"[DK] 账号「%@」已设为指定默认账号，即将退出", currentAccount);
+
+            // 同步然后退出
+            [[NSUserDefaults standardUserDefaults] synchronize];
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                sync();
+                exit(0);
+            });
+        }]];
+
+        UIViewController *rootVC = [self _rootViewController];
+        if (rootVC) {
+            [rootVC presentViewController:alert animated:YES completion:nil];
+        }
+    });
+}
+
+- (void)_showToast:(NSString *)message {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIWindow *keyWindow = nil;
+        if (@available(iOS 13.0, *)) {
+            for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+                if (scene.activationState == UISceneActivationStateForegroundActive) {
+                    if ([scene isKindOfClass:[UIWindowScene class]]) {
+                        UIWindowScene *windowScene = (UIWindowScene *)scene;
+                        keyWindow = windowScene.windows.firstObject;
+                    }
+                }
+            }
+        }
+        if (!keyWindow) {
+            keyWindow = [UIApplication sharedApplication].keyWindow;
+        }
+
+        UILabel *toast = [[UILabel alloc] init];
+        toast.text = message;
+        toast.textColor = [UIColor whiteColor];
+        toast.backgroundColor = [UIColor colorWithWhite:0.1 alpha:0.85];
+        toast.textAlignment = NSTextAlignmentCenter;
+        toast.font = [UIFont systemFontOfSize:14];
+        toast.layer.cornerRadius = 8;
+        toast.clipsToBounds = YES;
+
+        CGSize size = [message sizeWithAttributes:@{NSFontAttributeName: toast.font}];
+        CGFloat toastWidth = MIN(size.width + 32, keyWindow.bounds.size.width - 40);
+        toast.frame = CGRectMake((keyWindow.bounds.size.width - toastWidth) / 2.0,
+                                  keyWindow.bounds.size.height - 100,
+                                  toastWidth, size.height + 20);
+
+        [keyWindow addSubview:toast];
+        toast.alpha = 0;
+        [UIView animateWithDuration:0.3 animations:^{
+            toast.alpha = 1.0;
+        } completion:^(BOOL finished) {
+            [UIView animateWithDuration:0.3 delay:1.5 options:0 animations:^{
+                toast.alpha = 0;
+            } completion:^(BOOL finished) {
+                [toast removeFromSuperview];
+            }];
+        }];
+    });
+}
+
+- (UIViewController *)_rootViewController {
+    UIWindow *keyWindow = nil;
+    if (@available(iOS 13.0, *)) {
+        for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+            if (scene.activationState == UISceneActivationStateForegroundActive) {
+                if ([scene isKindOfClass:[UIWindowScene class]]) {
+                    UIWindowScene *windowScene = (UIWindowScene *)scene;
+                    keyWindow = windowScene.windows.firstObject;
+                }
+            }
+        }
+    }
+    if (!keyWindow) {
+        keyWindow = [UIApplication sharedApplication].keyWindow;
+    }
+
+    UIViewController *rootVC = keyWindow.rootViewController;
+    while (rootVC.presentedViewController) {
+        rootVC = rootVC.presentedViewController;
+    }
+    return rootVC;
 }
 
 - (void)_saveAccountList {

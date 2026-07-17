@@ -44,6 +44,12 @@
         // 默认账号的备份放在 DKAccounts 根目录下
         return [manager.accountsRootPath stringByAppendingPathComponent:@".default_backup"];
     }
+    // 如果此账号被指定为默认，也使用 .default_backup
+    // （其数据通过 rename 搬移，与原始默认账号共享同一备份位置）
+    if (manager.designatedDefaultAccountName &&
+        [accountName isEqualToString:manager.designatedDefaultAccountName]) {
+        return [manager.accountsRootPath stringByAppendingPathComponent:@".default_backup"];
+    }
     return [[manager dataPathForAccount:accountName] stringByAppendingPathComponent:@"AppData"];
 }
 

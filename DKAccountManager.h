@@ -57,4 +57,12 @@
 /// 获取账号元数据（如创建时间等）
 - (NSDictionary *)metadataForAccount:(NSString *)accountName;
 
+/// 被指定为默认的账号名称（nil 表示使用原始沙盒作为默认账号）
+/// 设定后，该账号的数据将直接使用 NSHomeDirectory()，而非独立备份目录
+@property (nonatomic, copy, readonly) NSString *designatedDefaultAccountName;
+
+/// 将当前活跃账号设为指定默认账号（需要重启生效）
+/// 操作后会自动 exit(0) 重启应用
+- (void)promptSetDesignatedDefault;
+
 @end

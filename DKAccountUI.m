@@ -481,14 +481,17 @@ static char kDKHiddenIndicatorKey;
         
         NSArray *accounts = [[DKAccountManager sharedManager] allAccountNames];
         NSString *currentAccount = [[DKAccountManager sharedManager] currentAccountName];
+        NSString *designatedDefault = [[DKAccountManager sharedManager] designatedDefaultAccountName];
         
         NSMutableArray *menuItems = [NSMutableArray arrayWithObject:@"➕ 添加账号"];
         
         // 添加默认账号（原始 TRAE 登录）
-        NSString *defaultDisplayName = @"📱 默认账号";
+        NSString *defaultDisplayName = designatedDefault
+            ? @"📱 默认账号（原始）"
+            : @"📱 默认账号";
         [menuItems addObject:defaultDisplayName];
         
-        // 添加其他账号
+        // 添加其他账号（标记指定默认）
         [menuItems addObjectsFromArray:accounts];
         
         BOOL filterEnabled = [DKContentFilterBypass sharedInstance].enabled;
@@ -581,6 +584,13 @@ static char kDKHiddenIndicatorKey;
             if (isCurrentAccount && !isAddAccount && !isHideOption && !isFilterToggle && !isClearData && !isVersionInfo) {
                 label.text = [NSString stringWithFormat:@"✓ %@", item];
                 label.textColor = [UIColor colorWithRed:0.3 green:0.9 blue:0.5 alpha:1.0];
+            }
+
+            // 标记指定默认账号
+            if (designatedDefault && [item isEqualToString:designatedDefault] &&
+                !isAddAccount && !isHideOption && !isFilterToggle && !isClearData && !isVersionInfo) {
+                label.text = [NSString stringWithFormat:@"⭐ %@", item];
+                label.textColor = [UIColor colorWithRed:1.0 green:0.85 blue:0.3 alpha:1.0];
             }
             
             [rowView addSubview:label];
@@ -713,7 +723,32 @@ static char kDKHiddenIndicatorKey;
     
     NSArray *accounts = [[DKAccountManager sharedManager] allAccountNames];
     NSString *accountName = accounts[index - 2];
-    [self _promptDeleteAccount:accountName];
+    
+    // 弹出操作菜单：删除 / 设为默认
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:accountName
+                                                                       message:@"选择操作"
+                                                                preferredStyle:UIAlertControllerStyleActionSheet];
+        
+        [alert addAction:[UIAlertAction actionWithTitle:@"设为默认账号"
+                                                  style:UIAlertActionStyleDefault
+                                                handler:^(UIAlertAction *action) {
+            [[DKAccountManager sharedManager] promptSetDesignatedDefault];
+        }]];
+        
+        [alert addAction:[UIAlertAction actionWithTitle:@"删除账号"
+                                                  style:UIAlertActionStyleDestructive
+                                                handler:^(UIAlertAction *action) {
+            [self _promptDeleteAccount:accountName];
+        }]];
+        
+        [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+        
+        UIViewController *rootVC = [self _rootViewController];
+        if (rootVC) {
+            [rootVC presentViewController:alert animated:YES completion:nil];
+        }
+    });
 }
 
 #pragma mark - 敏感词过滤开关

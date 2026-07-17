@@ -22,6 +22,7 @@
 #import "DKAccountManager.h"
 #import "DKAccountUI.h"
 #import "DKDataIsolation.h"
+#import "DKAppDataManager.h"
 #import "DKUserDefaultsHook.h"
 #import "DKKeychainHook.h"
 #import "DKNetworkSessionManager.h"
@@ -110,6 +111,11 @@ static NSString* DKCFPreferencesPlistPath(void) {
     if ([currentAccount isEqualToString:[manager defaultAccountName]]) {
         return nil;
     }
+    // 指定默认账号使用 NSHomeDirectory()，等同于原始默认账号
+    NSString *designatedDefault = [manager designatedDefaultAccountName];
+    if (designatedDefault && [currentAccount isEqualToString:designatedDefault]) {
+        return nil;
+    }
     return [[DKDataIsolation sharedInstance] userDefaultsFileForSuiteName:nil];
 }
 
@@ -160,7 +166,11 @@ static BOOL DKShouldUseOriginalDefaults(void) {
     if (manager.isSwitching) return YES;
 
     NSString *currentAccount = [manager currentAccountName];
-    return [currentAccount isEqualToString:[manager defaultAccountName]];
+    if ([currentAccount isEqualToString:[manager defaultAccountName]]) return YES;
+    // 指定默认账号使用 NSHomeDirectory()，等同于原始默认账号
+    NSString *designatedDefault = [manager designatedDefaultAccountName];
+    if (designatedDefault && [currentAccount isEqualToString:designatedDefault]) return YES;
+    return NO;
 }
 
 %hook NSUserDefaults
@@ -653,10 +663,27 @@ didReceiveNotificationResponse:(UNNotificationResponse *)response
         [[DKAccountManager sharedManager] refreshAccountList];
         NSString *currentAccount = [[DKAccountManager sharedManager] currentAccountName];
         NSString *defaultAccount = [[DKAccountManager sharedManager] defaultAccountName];
-        BOOL isNonDefaultAccount = ![currentAccount isEqualToString:defaultAccount];
+        NSString *designatedDefault = [[DKAccountManager sharedManager] designatedDefaultAccountName];
 
-        NSLog(@"[DK] BundleID=%@, 当前账号=%@, 非默认=%@, accountsRoot=%@",
-              bundleID, currentAccount, isNonDefaultAccount ? @"YES" : @"NO",
+        // 如果指定了默认账号且沙盒为空（插件刚更新/重装），
+        // 从备份恢复指定默认账号的数据到沙盒
+        if (designatedDefault) {
+            NSString *appLibrary = [NSHomeDirectory() stringByAppendingPathComponent:@"Library"];
+            NSArray *libContents = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:appLibrary error:nil];
+            if (libContents.count == 0) {
+                NSLog(@"[DK] 沙盒 Library/ 为空，从备份恢复指定默认账号「%@」", designatedDefault);
+                [[DKAppDataManager sharedManager] moveAccountDataToApp:designatedDefault];
+            }
+        }
+
+        // 指定默认账号使用 NSHomeDirectory()，等同于原始默认账号，
+        // 不需要清空 NSUserDefaults
+        BOOL isNonDefaultAccount = ![currentAccount isEqualToString:defaultAccount] &&
+            !(designatedDefault && [currentAccount isEqualToString:designatedDefault]);
+
+        NSLog(@"[DK] BundleID=%@, 当前账号=%@, 指定默认=%@, 非默认=%@, accountsRoot=%@",
+              bundleID, currentAccount, designatedDefault ?: @"无",
+              isNonDefaultAccount ? @"YES" : @"NO",
               [[DKAccountManager sharedManager] accountsRootPath]);
 
         if (isNonDefaultAccount) {
