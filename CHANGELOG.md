@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.0.49] - 2026-07-17
+
+- fd67045 根本修复: 子账号使用自定义 dk_<bundleID>.plist 绕过 cfprefsd 缓存
+
+
 ## [1.0.48] - 2026-07-17
 
 - a8cdabc 关键修复: 非默认账号无条件清空 NSUserDefaults + 强制 cfprefsd 同步
