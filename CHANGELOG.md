@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.0.55] - 2026-07-17
+
+- 2d35d6b fix: re-apply session after restoring .default_backup to prevent stale token
+
+
 ## [1.0.54] - 2026-07-17
 
 - f5b5670 fix: ensureDataOwnershipForAccount backup logic — don't overwrite valid backups
