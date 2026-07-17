@@ -608,6 +608,17 @@ static char kDKHiddenIndicatorKey;
                     badge.clipsToBounds = YES;
                     [rowView addSubview:badge];
                 }
+                
+                // 非默认账号：添加 ⭐ 设为默认按钮
+                if (!isDefaultAccount && !isAddAccount) {
+                    UIButton *starBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+                    starBtn.frame = CGRectMake(kMenuWidth - 52, 8, 32, 32);
+                    [starBtn setTitle:@"⭐" forState:UIControlStateNormal];
+                    starBtn.titleLabel.font = [UIFont systemFontOfSize:16];
+                    starBtn.tag = i;
+                    [starBtn addTarget:self action:@selector(_handleStarButtonTap:) forControlEvents:UIControlEventTouchUpInside];
+                    [rowView addSubview:starBtn];
+                }
             }
             
             rowView.tag = i;
@@ -724,17 +735,11 @@ static char kDKHiddenIndicatorKey;
     NSArray *accounts = [[DKAccountManager sharedManager] allAccountNames];
     NSString *accountName = accounts[index - 2];
     
-    // 弹出操作菜单：删除 / 设为默认
+    // 弹出删除确认
     dispatch_async(dispatch_get_main_queue(), ^{
         UIAlertController *alert = [UIAlertController alertControllerWithTitle:accountName
-                                                                       message:@"选择操作"
+                                                                       message:nil
                                                                 preferredStyle:UIAlertControllerStyleActionSheet];
-        
-        [alert addAction:[UIAlertAction actionWithTitle:@"设为默认账号"
-                                                  style:UIAlertActionStyleDefault
-                                                handler:^(UIAlertAction *action) {
-            [[DKAccountManager sharedManager] promptSetDesignatedDefault];
-        }]];
         
         [alert addAction:[UIAlertAction actionWithTitle:@"删除账号"
                                                   style:UIAlertActionStyleDestructive
@@ -749,6 +754,18 @@ static char kDKHiddenIndicatorKey;
             [rootVC presentViewController:alert animated:YES completion:nil];
         }
     });
+}
+
+- (void)_handleStarButtonTap:(UIButton *)sender {
+    NSInteger index = sender.tag;
+    [self hideAccountMenu];
+    
+    NSArray *accounts = [[DKAccountManager sharedManager] allAccountNames];
+    NSInteger accountIndex = index - 2;
+    if (accountIndex >= 0 && accountIndex < accounts.count) {
+        NSString *accountName = accounts[accountIndex];
+        [[DKAccountManager sharedManager] promptSetDesignatedDefaultForAccount:accountName];
+    }
 }
 
 #pragma mark - 敏感词过滤开关

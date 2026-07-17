@@ -68,7 +68,7 @@
     if (![fm fileExistsAtPath:dstParent]) {
         [fm createDirectoryAtPath:dstParent
       withIntermediateDirectories:YES
-                       attributes:nil
+                       attributes:@{NSFileProtectionKey: NSFileProtectionNone}
                             error:&error];
         if (error) {
             NSLog(@"[DK] 创建备份父目录失败: %@ → %@", dstParent, error);
@@ -89,7 +89,7 @@
     if (![fm fileExistsAtPath:srcDir]) {
         [fm createDirectoryAtPath:dstDir
       withIntermediateDirectories:YES
-                       attributes:nil
+                       attributes:@{NSFileProtectionKey: NSFileProtectionNone}
                             error:&error];
         if (error) {
             NSLog(@"[DK] 创建空目录失败: %@ → %@", dstDir, error);
@@ -99,22 +99,78 @@
         return YES;
     }
 
-    // 使用 rename() 做原子搬移
-    const char *srcPath = [srcDir fileSystemRepresentation];
-    const char *dstPath = [dstDir fileSystemRepresentation];
-    if (rename(srcPath, dstPath) != 0) {
-        // rename 失败，尝试用 copy + delete 兜底
-        NSLog(@"[DK] rename 失败 (errno=%d)，尝试 copy+delete: %@ → %@",
-              errno, srcDir, dstDir);
-        if (![fm copyItemAtPath:srcDir toPath:dstDir error:&error]) {
-            NSLog(@"[DK] copy 也失败: %@", error);
-            return NO;
-        }
-        [fm removeItemAtPath:srcDir error:nil];
+    // 方案1: 尝试 NSFileManager moveItemAtPath（iOS 推荐方式）
+    if ([fm moveItemAtPath:srcDir toPath:dstDir error:&error]) {
+        NSLog(@"[DK] moveItemAtPath 成功: %@ → %@", srcDir, dstDir);
+        return YES;
+    }
+    NSLog(@"[DK] moveItemAtPath 失败 (error=%@), 尝试逐个子目录搬移: %@ → %@",
+          error, srcDir, dstDir);
+
+    // 方案2: 逐个子目录搬移
+    // 大目录的整目录 move 可能因沙盒限制失败，但子目录的 move 通常能成功
+    return [self _moveSubdirectories:srcDir toDirectory:dstDir];
+}
+
+/// 逐个子目录搬移（兜底方案）
+- (BOOL)_moveSubdirectories:(NSString *)srcDir toDirectory:(NSString *)dstDir {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSError *error = nil;
+
+    [fm createDirectoryAtPath:dstDir
+  withIntermediateDirectories:YES
+                   attributes:@{NSFileProtectionKey: NSFileProtectionNone}
+                        error:nil];
+
+    NSArray *contents = [fm contentsOfDirectoryAtPath:srcDir error:&error];
+    if (error) {
+        NSLog(@"[DK] 列出源目录内容失败: %@", error);
+        return NO;
     }
 
-    NSLog(@"[DK] 目录搬移成功: %@ → %@", srcDir, dstDir);
-    return YES;
+    BOOL allSuccess = YES;
+    for (NSString *item in contents) {
+        // 跳过 DKAccounts 自身（在 Documents/ 下的子目录中可能出现）
+        if ([item isEqualToString:@"DKAccounts"]) {
+            NSLog(@"[DK]   ⏭ 跳过 DKAccounts 自身");
+            continue;
+        }
+
+        NSString *srcItem = [srcDir stringByAppendingPathComponent:item];
+        NSString *dstItem = [dstDir stringByAppendingPathComponent:item];
+
+        // 先尝试 rename（最快）
+        if (rename([srcItem fileSystemRepresentation], [dstItem fileSystemRepresentation]) == 0) {
+            NSLog(@"[DK]   ✅ %@ (rename)", item);
+            continue;
+        }
+
+        // 再尝试 moveItemAtPath
+        if ([fm moveItemAtPath:srcItem toPath:dstItem error:&error]) {
+            NSLog(@"[DK]   ✅ %@ (move)", item);
+            continue;
+        }
+
+        // 最后尝试 copy + delete
+        if ([fm copyItemAtPath:srcItem toPath:dstItem error:&error]) {
+            [fm removeItemAtPath:srcItem error:nil];
+            NSLog(@"[DK]   ✅ %@ (copy+delete)", item);
+            continue;
+        }
+
+        NSLog(@"[DK]   ❌ %@: %@", item, error);
+        allSuccess = NO;
+    }
+
+    // 清理源目录（如果为空）
+    NSArray *remaining = [fm contentsOfDirectoryAtPath:srcDir error:nil];
+    if (remaining.count == 0) {
+        [fm removeItemAtPath:srcDir error:nil];
+    } else {
+        NSLog(@"[DK] 源目录仍有 %lu 项未搬移: %@", (unsigned long)remaining.count, remaining);
+    }
+
+    return allSuccess;
 }
 
 #pragma mark - 公开接口
@@ -122,28 +178,22 @@
 - (BOOL)moveAppDataToAccount:(NSString *)accountName {
     NSString *appHome = [self appHomePath];
     NSString *backupRoot = [self backupRootPathForAccount:accountName];
-    BOOL success = YES;
 
     NSLog(@"[DK] ========================================");
     NSLog(@"[DK] 搬移应用数据 → 账号: %@", accountName);
     NSLog(@"[DK] 源: %@", appHome);
     NSLog(@"[DK] 目标: %@", backupRoot);
 
-    // 搬移 Library/ 目录（包含 Preferences, Caches, Application Support, Cookies 等）
-    // 这是 MMKV、WCDB、NSUserDefaults plist、Cookie 等所有关键数据的存储位置。
-    // 不搬移 Documents/，因为 Documents/ 包含 DKAccounts/ 备份目录自身，
-    // 搬移会形成递归。
     NSString *srcLibrary = [appHome stringByAppendingPathComponent:@"Library"];
     NSString *dstLibrary = [backupRoot stringByAppendingPathComponent:@"Library"];
-    if (![self _moveDirectory:srcLibrary toDirectory:dstLibrary]) {
-        NSLog(@"[DK] ❌ Library/ 搬移失败");
-        success = NO;
-    } else {
-        NSLog(@"[DK] ✅ Library/ 搬移成功");
-    }
 
-    // 确保应用沙盒中 Library/ 目录存在
-    // （搬移后这些目录为空，需要重建，否则应用可能崩溃）
+    if (![self _moveDirectory:srcLibrary toDirectory:dstLibrary]) {
+        NSLog(@"[DK] ❌ Library/ 搬移失败，放弃本次切换");
+        return NO;
+    }
+    NSLog(@"[DK] ✅ Library/ 搬移成功");
+
+    // 搬移成功后才重建空目录结构
     NSFileManager *fm = [NSFileManager defaultManager];
     for (NSString *subdir in @[@"Library", @"Documents", @"tmp"]) {
         NSString *path = [appHome stringByAppendingPathComponent:subdir];
@@ -167,29 +217,50 @@
         }
     }
 
-    NSLog(@"[DK] 应用数据搬移完成 (成功=%@)", success ? @"YES" : @"NO");
-    return success;
+    NSLog(@"[DK] 应用数据搬移完成");
+    return YES;
 }
 
 - (BOOL)moveAccountDataToApp:(NSString *)accountName {
     NSString *appHome = [self appHomePath];
     NSString *backupRoot = [self backupRootPathForAccount:accountName];
-    BOOL success = YES;
 
     NSLog(@"[DK] ========================================");
     NSLog(@"[DK] 搬移账号数据 → 应用: %@", accountName);
     NSLog(@"[DK] 源: %@", backupRoot);
     NSLog(@"[DK] 目标: %@", appHome);
 
-    // 搬移 Library/ 目录（与 moveAppDataToAccount 对称，只搬移 Library/）
     NSString *srcLibrary = [backupRoot stringByAppendingPathComponent:@"Library"];
     NSString *dstLibrary = [appHome stringByAppendingPathComponent:@"Library"];
+
+    // 如果备份不存在（新账号），创建空目录结构即可
+    if (![[NSFileManager defaultManager] fileExistsAtPath:srcLibrary]) {
+        NSLog(@"[DK] 账号 %@ 无备份数据（新账号），创建空目录", accountName);
+        NSFileManager *fm = [NSFileManager defaultManager];
+        // 先删除旧的 Library/（如果有的话，应该是空的或残留的）
+        if ([fm fileExistsAtPath:dstLibrary]) {
+            [fm removeItemAtPath:dstLibrary error:nil];
+        }
+        [fm createDirectoryAtPath:dstLibrary
+      withIntermediateDirectories:YES
+                       attributes:nil
+                            error:nil];
+        for (NSString *subdir in @[@"Library/Preferences", @"Library/Caches",
+                                    @"Library/Cookies", @"Library/Application Support"]) {
+            [fm createDirectoryAtPath:[appHome stringByAppendingPathComponent:subdir]
+          withIntermediateDirectories:YES
+                           attributes:nil
+                                error:nil];
+        }
+        NSLog(@"[DK] 新账号空目录已创建");
+        return YES;
+    }
+
     if (![self _moveDirectory:srcLibrary toDirectory:dstLibrary]) {
         NSLog(@"[DK] ❌ Library/ 搬移失败");
-        success = NO;
-    } else {
-        NSLog(@"[DK] ✅ Library/ 搬移成功");
+        return NO;
     }
+    NSLog(@"[DK] ✅ Library/ 搬移成功");
 
     // 清理备份根目录（已搬移，目录为空）
     NSFileManager *fm = [NSFileManager defaultManager];
@@ -200,8 +271,8 @@
         }
     }
 
-    NSLog(@"[DK] 账号数据搬移完成 (成功=%@)", success ? @"YES" : @"NO");
-    return success;
+    NSLog(@"[DK] 账号数据搬移完成");
+    return YES;
 }
 
 - (BOOL)hasBackupForAccount:(NSString *)accountName {

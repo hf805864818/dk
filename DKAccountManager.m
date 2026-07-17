@@ -472,15 +472,57 @@ static NSString *_accountsRootPath = nil;
 
                 // ============================================================
                 // 目录级数据搬移（借鉴 Crane 容器级隔离思路）
-                // 将当前 App 沙盒的 Library/ 和 Documents/ 搬移到旧账号备份，
+                // 将当前 App 沙盒的 Library/ 搬移到旧账号备份，
                 // 再将目标账号的备份搬移回 App 沙盒。
                 // 这能捕获 MMKV、WCDB 等绕过 API Hook 的 C++ 存储引擎数据。
                 // ============================================================
                 if (![oldAccount isEqualToString:name]) {
                     // 1. 将当前 App 数据搬移到旧账号备份
-                    [[DKAppDataManager sharedManager] moveAppDataToAccount:oldAccount];
+                    BOOL moveSuccess = [[DKAppDataManager sharedManager] moveAppDataToAccount:oldAccount];
+                    if (!moveSuccess) {
+                        // 搬移失败，恢复旧账号名并提示用户
+                        NSLog(@"[DK] ❌ 数据搬移失败，回退账号切换");
+                        _currentAccountName = oldAccount;
+                        [self saveCurrentState];
+                        // 切回旧账号，不退出
+                        dispatch_async(dispatch_get_main_queue(), ^{
+                            UIAlertController *failAlert = [UIAlertController
+                                alertControllerWithTitle:@"切换失败"
+                                message:@"数据搬移失败，请尝试关闭应用后重试"
+                                preferredStyle:UIAlertControllerStyleAlert];
+                            [failAlert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
+                            UIViewController *rootVC = [self _rootViewController];
+                            if (rootVC) {
+                                [rootVC presentViewController:failAlert animated:YES completion:nil];
+                            }
+                        });
+                        return;
+                    }
+                    NSLog(@"[DK] ✅ 旧账号「%@」数据已备份", oldAccount);
+
                     // 2. 将目标账号数据搬移回 App 沙盒
-                    [[DKAppDataManager sharedManager] moveAccountDataToApp:name];
+                    // 新账号无备份时，moveAccountDataToApp 创建空目录并返回 YES
+                    BOOL restoreSuccess = [[DKAppDataManager sharedManager] moveAccountDataToApp:name];
+                    if (!restoreSuccess) {
+                        NSLog(@"[DK] ❌ 目标账号数据恢复失败，回退");
+                        // 尝试从旧账号恢复
+                        [[DKAppDataManager sharedManager] moveAccountDataToApp:oldAccount];
+                        _currentAccountName = oldAccount;
+                        [self saveCurrentState];
+                        dispatch_async(dispatch_get_main_queue(), ^{
+                            UIAlertController *failAlert = [UIAlertController
+                                alertControllerWithTitle:@"切换失败"
+                                message:@"目标账号数据恢复失败，已回退"
+                                preferredStyle:UIAlertControllerStyleAlert];
+                            [failAlert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
+                            UIViewController *rootVC = [self _rootViewController];
+                            if (rootVC) {
+                                [rootVC presentViewController:failAlert animated:YES completion:nil];
+                            }
+                        });
+                        return;
+                    }
+                    NSLog(@"[DK] ✅ 目标账号「%@」数据已恢复", name);
                 }
 
                 // 发送账号切换通知
@@ -662,24 +704,34 @@ static NSString *_accountsRootPath = nil;
 }
 
 - (void)promptSetDesignatedDefault {
+    [self promptSetDesignatedDefaultForAccount:_currentAccountName];
+}
+
+- (void)promptSetDesignatedDefaultForAccount:(NSString *)accountName {
     dispatch_async(dispatch_get_main_queue(), ^{
-        NSString *currentAccount = _currentAccountName;
         NSString *defaultAccount = kDKDefaultAccountName;
 
         // 如果当前就是默认账号，无需操作
-        if ([currentAccount isEqualToString:defaultAccount] &&
+        if ([accountName isEqualToString:defaultAccount] &&
             !_designatedDefaultAccountName) {
             [self _showToast:@"当前已是默认账号"];
             return;
         }
 
+        // 如果已经是指定默认，无需操作
+        if (_designatedDefaultAccountName &&
+            [accountName isEqualToString:_designatedDefaultAccountName]) {
+            [self _showToast:@"当前已是指定默认账号"];
+            return;
+        }
+
         NSString *title = @"设为默认账号";
         NSString *message = [NSString stringWithFormat:
-            @"将当前账号「%@」设为默认账号？\n\n"
+            @"将账号「%@」设为默认账号？\n\n"
             @"设定后，该账号数据将直接使用应用原始沙盒路径。\n"
             @"更新插件后无需重新登录此账号。\n\n"
             @"原默认账号数据会保留在备份中，可随时切换回去。",
-            currentAccount];
+            accountName];
 
         UIAlertController *alert = [UIAlertController alertControllerWithTitle:title
                                                                        message:message
@@ -689,13 +741,13 @@ static NSString *_accountsRootPath = nil;
 
         [alert addAction:[UIAlertAction actionWithTitle:@"设为默认" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
             // 保存指定默认账号标记
-            [self _saveDesignatedDefault:currentAccount];
-            _designatedDefaultAccountName = currentAccount;
+            [self _saveDesignatedDefault:accountName];
+            _designatedDefaultAccountName = accountName;
 
             // 保存当前状态
             [self saveCurrentState];
 
-            NSLog(@"[DK] 账号「%@」已设为指定默认账号，即将退出", currentAccount);
+            NSLog(@"[DK] 账号「%@」已设为指定默认账号，即将退出", accountName);
 
             // 同步然后退出
             [[NSUserDefaults standardUserDefaults] synchronize];

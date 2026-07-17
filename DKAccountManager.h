@@ -65,4 +65,8 @@
 /// 操作后会自动 exit(0) 重启应用
 - (void)promptSetDesignatedDefault;
 
+/// 将指定账号设为指定默认账号（需要重启生效）
+/// 操作后会自动 exit(0) 重启应用
+- (void)promptSetDesignatedDefaultForAccount:(NSString *)accountName;
+
 @end
