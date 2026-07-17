@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.53] - 2026-07-17
+
+- c43a553 fix: add DKFileManagerHook.m to Makefile source list
+- f3cd363 fix: add extern declaration for DKRemapFilePath in Tweak.x
+- e7cabb2 fix: add POSIX hooks (open/stat/access/fopen) to intercept MMKV/WCDB direct file I/O
+
+
 ## [1.0.52] - 2026-07-17
 
 - a8bc754 fix: CFPreferences/Keychain Hook 缺少 isSwitching 守卫导致账号切换失败
