@@ -1,5 +1,6 @@
 #import "DKAppDataManager.h"
 #import "DKAccountManager.h"
+#import "DKNetworkSessionManager.h"
 #import <unistd.h>
 
 // ============================================================
@@ -496,6 +497,21 @@ static NSString *const kDKLibraryOwnerFile = @".dk_library_owner";
                 }
             }
         }
+
+        // 重新应用会话数据到沙盒（修复跨账号切换后会话丢失）
+        //
+        // ensureDataOwnershipForAccount 用 .default_backup/ 覆盖了沙盒，
+        // 但 .default_backup 是第一次切换时备份的，可能包含过期的 token。
+        // switchToAccount 的 handler 在 exit(0) 前已通过 restoreSessionForAccount
+        // 将最新会话写入沙盒，但被此处的目录恢复覆盖了。
+        //
+        // 因此需要重新调用 restoreSessionForAccount 来应用 .dk_default_session.plist
+        // 中的最新会话数据（__DK_FULL_DOMAIN__ 包含完整 NSUserDefaults 快照）。
+        // 注意：此时 %ctor 尚未安装 Hook，NSUserDefaults 写入直达沙盒。
+        [[DKNetworkSessionManager sharedManager] restoreSessionForAccount:currentAccount
+                                                    clearSessionIfMissing:NO];
+        NSLog(@"[DK] 默认账号会话已重新应用");
+
     } else {
         // 当前账号是子账号：清空沙盒即可，Hook 会重定向到隔离目录
         NSLog(@"[DK] 当前账号「%@」是子账号，清空沙盒（Hook 将重定向到隔离目录）", currentAccount);
