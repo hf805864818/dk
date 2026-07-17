@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.0.50] - 2026-07-17
+
+- c8e8276 fix: rename()失败时用递归删除代替不可靠的_moveSubdirectories，解决旧数据残留导致子账号启动显示默认账号界面
+
+
 ## [1.0.49] - 2026-07-17
 
 - fd67045 根本修复: 子账号使用自定义 dk_<bundleID>.plist 绕过 cfprefsd 缓存
