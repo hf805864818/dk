@@ -656,6 +656,19 @@ didReceiveNotificationResponse:(UNNotificationResponse *)response
     @autoreleasepool {
         NSString *bundleID = DKGetCurrentBundleID();
 
+        // ============================================================
+        // 启动时清理上次 exit(0) 前可能残留的临时目录
+        // DKAppDataManager 异步清理 Library.old/Library.tmp，
+        // 如果 App 在清理前就被杀，残留目录会影响下次启动。
+        // ============================================================
+        for (NSString *suffix in @[@"Library.old", @"Library.tmp"]) {
+            NSString *tmpPath = [NSHomeDirectory() stringByAppendingPathComponent:suffix];
+            if ([[NSFileManager defaultManager] fileExistsAtPath:tmpPath]) {
+                [[NSFileManager defaultManager] removeItemAtPath:tmpPath error:nil];
+                NSLog(@"[DK] 清理残留临时目录: %@", suffix);
+            }
+        }
+
         NSLog(@"========================================");
         NSLog(@"[DK] DK Multi-Account Tweak v%@ 已加载", DK_VERSION);
         NSLog(@"[DK] 构建时间: %@", DK_BUILD_TIME);

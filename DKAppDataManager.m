@@ -56,9 +56,16 @@
 #pragma mark - 核心搬移逻辑
 
 /// 安全搬移目录：将 srcDir 搬移到 dstDir
-/// 如果 dstDir 已存在，先删除
-/// 如果 srcDir 不存在，创建空的 dstDir
-/// @return 成功返回 YES
+///
+/// 核心策略：使用 rename() 原子交换，避免删除活跃目录（活跃目录中的文件可能被 mmap 占用，
+/// removeItemAtPath 会失败）。rename() 只改目录项/inode 指针，不碰文件数据，
+/// 即使文件正在被 mmap 也能成功。
+///
+/// 流程：
+///   1. 如果 dstDir 不存在 → 直接 rename(srcDir → dstDir)
+///   2. 如果 dstDir 存在 → rename(dstDir → dstDir.tmp)，rename(srcDir → dstDir)，删除 dstDir.tmp
+///   3. 如果 srcDir 不存在 → 创建空 dstDir
+///   4. 如果 rename 失败 → 逐个子目录搬移兜底
 - (BOOL)_moveDirectory:(NSString *)srcDir toDirectory:(NSString *)dstDir {
     NSFileManager *fm = [NSFileManager defaultManager];
     NSError *error = nil;
@@ -72,15 +79,6 @@
                             error:&error];
         if (error) {
             NSLog(@"[DK] 创建备份父目录失败: %@ → %@", dstParent, error);
-            return NO;
-        }
-    }
-
-    // 如果目标已存在，先删除
-    if ([fm fileExistsAtPath:dstDir]) {
-        [fm removeItemAtPath:dstDir error:&error];
-        if (error) {
-            NSLog(@"[DK] 删除旧备份失败: %@ → %@", dstDir, error);
             return NO;
         }
     }
@@ -99,16 +97,54 @@
         return YES;
     }
 
-    // 方案1: 尝试 NSFileManager moveItemAtPath（iOS 推荐方式）
-    if ([fm moveItemAtPath:srcDir toPath:dstDir error:&error]) {
-        NSLog(@"[DK] moveItemAtPath 成功: %@ → %@", srcDir, dstDir);
-        return YES;
-    }
-    NSLog(@"[DK] moveItemAtPath 失败 (error=%@), 尝试逐个子目录搬移: %@ → %@",
-          error, srcDir, dstDir);
+    const char *srcPath = [srcDir fileSystemRepresentation];
+    const char *dstPath = [dstDir fileSystemRepresentation];
 
-    // 方案2: 逐个子目录搬移
-    // 大目录的整目录 move 可能因沙盒限制失败，但子目录的 move 通常能成功
+    BOOL dstExists = [fm fileExistsAtPath:dstDir];
+
+    if (!dstExists) {
+        // 目标不存在：直接 rename 即可
+        if (rename(srcPath, dstPath) == 0) {
+            NSLog(@"[DK] rename 直接成功: %@ → %@", srcDir, dstDir);
+            return YES;
+        }
+        NSLog(@"[DK] rename 直接失败 (errno=%d), 尝试 moveItemAtPath: %@ → %@",
+              errno, srcDir, dstDir);
+    } else {
+        // 目标已存在：用 rename 做原子交换
+        // 1. rename(dstDir → dstDir.tmp)  — 把旧目标挪开
+        // 2. rename(srcDir → dstDir)     — 把新数据放进来
+        // 3. 删除 dstDir.tmp              — 清理
+        NSString *tmpDir = [dstDir stringByAppendingString:@".tmp"];
+        const char *tmpPath = [tmpDir fileSystemRepresentation];
+
+        // 先清理可能残留的 tmp 目录
+        if ([fm fileExistsAtPath:tmpDir]) {
+            [fm removeItemAtPath:tmpDir error:nil];
+        }
+
+        if (rename(dstPath, tmpPath) == 0) {
+            NSLog(@"[DK] 已把旧目标挪到 .tmp: %@", dstDir);
+            if (rename(srcPath, dstPath) == 0) {
+                NSLog(@"[DK] rename 交换成功: %@ → %@", srcDir, dstDir);
+                // 异步清理 tmp 目录（删除可能慢，先返回成功）
+                dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0), ^{
+                    [[NSFileManager defaultManager] removeItemAtPath:tmpDir error:nil];
+                    NSLog(@"[DK] .tmp 目录已清理: %@", tmpDir);
+                });
+                return YES;
+            } else {
+                // 恢复：把旧目标挪回来
+                NSLog(@"[DK] rename 第二步失败 (errno=%d), 回退", errno);
+                rename(tmpPath, dstPath);
+            }
+        } else {
+            NSLog(@"[DK] rename 第一步失败 (errno=%d): 无法把旧目标挪开", errno);
+        }
+    }
+
+    // 兜底：逐个子目录搬移
+    NSLog(@"[DK] rename 方案失败, 尝试逐个子目录搬移: %@ → %@", srcDir, dstDir);
     return [self _moveSubdirectories:srcDir toDirectory:dstDir];
 }
 
@@ -236,22 +272,37 @@
     // 如果备份不存在（新账号），创建空目录结构即可
     if (![[NSFileManager defaultManager] fileExistsAtPath:srcLibrary]) {
         NSLog(@"[DK] 账号 %@ 无备份数据（新账号），创建空目录", accountName);
-        NSFileManager *fm = [NSFileManager defaultManager];
-        // 先删除旧的 Library/（如果有的话，应该是空的或残留的）
-        if ([fm fileExistsAtPath:dstLibrary]) {
-            [fm removeItemAtPath:dstLibrary error:nil];
+        // 用 rename 把旧 Library 挪开，再创建新的空 Library
+        NSString *oldLibrary = [appHome stringByAppendingPathComponent:@"Library.old"];
+        const char *oldPath = [oldLibrary fileSystemRepresentation];
+        const char *dstPath = [dstLibrary fileSystemRepresentation];
+
+        // 清理可能残留的 .old 目录
+        if ([[NSFileManager defaultManager] fileExistsAtPath:oldLibrary]) {
+            [[NSFileManager defaultManager] removeItemAtPath:oldLibrary error:nil];
         }
+
+        // 把旧 Library 挪到 .old（不删除，用 rename 避免文件被占用的问题）
+        if ([[NSFileManager defaultManager] fileExistsAtPath:dstLibrary]) {
+            rename(dstPath, oldPath);
+        }
+
+        NSFileManager *fm = [NSFileManager defaultManager];
         [fm createDirectoryAtPath:dstLibrary
       withIntermediateDirectories:YES
-                       attributes:nil
+                       attributes:@{NSFileProtectionKey: NSFileProtectionNone}
                             error:nil];
         for (NSString *subdir in @[@"Library/Preferences", @"Library/Caches",
                                     @"Library/Cookies", @"Library/Application Support"]) {
             [fm createDirectoryAtPath:[appHome stringByAppendingPathComponent:subdir]
           withIntermediateDirectories:YES
-                           attributes:nil
+                           attributes:@{NSFileProtectionKey: NSFileProtectionNone}
                                 error:nil];
         }
+        // 异步清理 .old
+        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0), ^{
+            [[NSFileManager defaultManager] removeItemAtPath:oldLibrary error:nil];
+        });
         NSLog(@"[DK] 新账号空目录已创建");
         return YES;
     }
