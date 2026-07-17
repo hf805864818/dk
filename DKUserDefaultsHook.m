@@ -106,9 +106,32 @@ NSUserDefaults* DKGetAccountUserDefaults(NSString *suiteName) {
 // ============================================================
 
 static NSString* _DKGetAccountPlistPath(void) {
-    // 目录搬移方案：所有账号的数据都在沙盒 Library/Preferences/ 中，
-    // 不需要重定向到独立的 plist。返回 nil 表示使用原始路径。
-    return nil;
+    DKAccountManager *manager = [DKAccountManager sharedManager];
+    NSString *currentAccount = [manager currentAccountName];
+    if ([currentAccount isEqualToString:[manager defaultAccountName]]) {
+        return nil;
+    }
+    NSString *designatedDefault = [manager designatedDefaultAccountName];
+    if (designatedDefault && [currentAccount isEqualToString:designatedDefault]) {
+        return nil;
+    }
+
+    // 使用自定义文件名 dk_<bundleID>.plist，绕过 cfprefsd。
+    // cfprefsd 只管理 <bundleID>.plist，不同文件名意味着：
+    // 1. cfprefsd 不会缓存这个文件的数据
+    // 2. 子账号的 NSUserDefaults 完全由我们控制
+    // 3. 即使 %ctor 中 removePersistentDomainForName 来不及通知 cfprefsd，
+    //    子账号也不会读到默认账号的登录态
+    NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
+    NSString *prefsDir = [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Preferences"];
+    NSString *filename = [NSString stringWithFormat:@"dk_%@.plist", bundleID];
+    NSString *plistPath = [prefsDir stringByAppendingPathComponent:filename];
+
+    // 确保文件存在
+    if (![[NSFileManager defaultManager] fileExistsAtPath:plistPath]) {
+        [@{} writeToFile:plistPath atomically:YES];
+    }
+    return plistPath;
 }
 
 // 直接从账号独立的 plist 读取值（用于 Hook 中，避免递归）

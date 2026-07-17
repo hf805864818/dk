@@ -335,24 +335,26 @@ static NSString *const kDKLibraryOwnerFile = @".dk_library_owner";
 
 - (void)ensureDataOwnershipForAccount:(NSString *)currentAccount
                     designatedDefault:(NSString *)designatedDefault {
-    // 默认账号 + 无指定默认 → 不需要检查
     NSString *defaultAccount = [[DKAccountManager sharedManager] defaultAccountName];
-    if ([currentAccount isEqualToString:defaultAccount] && !designatedDefault) {
-        return;
-    }
 
-    // 指定默认账号 → 等同于默认账号，不需要检查
+    // 指定默认账号 → 等同于默认账号，写入标记即可
     if (designatedDefault && [currentAccount isEqualToString:designatedDefault]) {
         [self _writeLibraryOwner:currentAccount];
         return;
     }
 
     NSString *owner = [self _readLibraryOwner];
-    NSLog(@"[DK] 启动时数据所有权检查: 当前账号=%@, Library所有者=%@", currentAccount, owner ?: @"无");
+    NSLog(@"[DK] 启动时数据所有权检查: 当前账号=%@, Library所有者=%@, 指定默认=%@",
+          currentAccount, owner ?: @"无", designatedDefault ?: @"无");
 
     // 如果所有权标记匹配，一切正常
     if (owner && [owner isEqualToString:currentAccount]) {
         NSLog(@"[DK] 数据所有权匹配，无需恢复");
+        return;
+    }
+
+    // 默认账号且无所有权标记 → 正常启动，无需交换
+    if ([currentAccount isEqualToString:defaultAccount] && !owner) {
         return;
     }
 
