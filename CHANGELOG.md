@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.0.52] - 2026-07-17
+
+- a8bc754 fix: CFPreferences/Keychain Hook 缺少 isSwitching 守卫导致账号切换失败
+
+
 ## [1.0.51] - 2026-07-17
 
 - 4163f36 fix: 拦截Keychain宽查询避免子账号读取默认账号登录态
