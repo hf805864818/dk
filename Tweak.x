@@ -186,6 +186,13 @@ static BOOL DKShouldUseOriginalDefaults(void) {
     return NO;
 }
 
+// CFPreferences 隔离守卫：与 DKShouldUseOriginalDefaults 逻辑一致，
+// 确保在切换账号（isSwitching=YES）时 CFPreferences Hook 也透传到原始逻辑，
+// 避免 saveCurrentState 中的 DK_Current_Account 写入被重定向到隔离 plist。
+static BOOL DKShouldUseOriginalCFPreferences(void) {
+    return DKShouldUseOriginalDefaults();
+}
+
 %hook NSUserDefaults
 
 - (id)objectForKey:(NSString *)defaultName {
@@ -883,7 +890,7 @@ static id DKKeychainProjectedResultForOriginalQuery(NSDictionary *originalQuery,
 }
 
 static OSStatus hooked_SecItemAdd(CFDictionaryRef query, CFTypeRef *result) {
-    if (_dkStartupGuard) return original_SecItemAdd(query, result);
+    if (DKShouldUseOriginalCFPreferences()) return original_SecItemAdd(query, result);
     NSDictionary *nsQuery = (__bridge NSDictionary *)query;
     NSDictionary *scopedQuery = DKKeychainQueryWithSyntheticScopeIfNeeded(nsQuery);
     NSDictionary *mappedQuery = DKRemapKeychainQuery(scopedQuery);
@@ -891,7 +898,7 @@ static OSStatus hooked_SecItemAdd(CFDictionaryRef query, CFTypeRef *result) {
 }
 
 static OSStatus hooked_SecItemCopyMatching(CFDictionaryRef query, CFTypeRef *result) {
-    if (_dkStartupGuard) return original_SecItemCopyMatching(query, result);
+    if (DKShouldUseOriginalCFPreferences()) return original_SecItemCopyMatching(query, result);
     NSDictionary *nsQuery = (__bridge NSDictionary *)query;
 
     // 非默认账号的宽查询必须特殊处理。
@@ -986,7 +993,7 @@ static OSStatus hooked_SecItemCopyMatching(CFDictionaryRef query, CFTypeRef *res
 }
 
 static OSStatus hooked_SecItemUpdate(CFDictionaryRef query, CFDictionaryRef attributesToUpdate) {
-    if (_dkStartupGuard) return original_SecItemUpdate(query, attributesToUpdate);
+    if (DKShouldUseOriginalCFPreferences()) return original_SecItemUpdate(query, attributesToUpdate);
     NSDictionary *nsQuery = (__bridge NSDictionary *)query;
     NSDictionary *scopedQuery = DKKeychainQueryWithSyntheticScopeIfNeeded(nsQuery);
     NSDictionary *mappedQuery = DKRemapKeychainQuery(scopedQuery);
@@ -997,7 +1004,7 @@ static OSStatus hooked_SecItemUpdate(CFDictionaryRef query, CFDictionaryRef attr
 }
 
 static OSStatus hooked_SecItemDelete(CFDictionaryRef query) {
-    if (_dkStartupGuard) return original_SecItemDelete(query);
+    if (DKShouldUseOriginalCFPreferences()) return original_SecItemDelete(query);
     NSDictionary *nsQuery = (__bridge NSDictionary *)query;
     if (DKIsNonDefaultKeychainAccount()) {
         // 非默认账号：检查删除操作是否有可能误删其他账号的 Keychain 项。
@@ -1066,7 +1073,7 @@ static OSStatus hooked_SecItemDelete(CFDictionaryRef query) {
 // ============================================================
 
 static void hooked_CFPreferencesSetAppValue(CFStringRef key, CFPropertyListRef value, CFStringRef applicationID) {
-    if (_dkStartupGuard) {
+    if (DKShouldUseOriginalCFPreferences()) {
         original_CFPreferencesSetAppValue(key, value, applicationID);
         return;
     }
@@ -1087,7 +1094,9 @@ static void hooked_CFPreferencesSetAppValue(CFStringRef key, CFPropertyListRef v
 }
 
 static CFPropertyListRef hooked_CFPreferencesCopyAppValue(CFStringRef key, CFStringRef applicationID) {
-    if (_dkStartupGuard) return original_CFPreferencesCopyAppValue(key, applicationID);
+    if (DKShouldUseOriginalCFPreferences()) {
+        return original_CFPreferencesCopyAppValue(key, applicationID);
+    }
     NSMutableDictionary *dict = DKCFPreferencesLoad();
     if (dict) {
         // 非默认账号：从独立 plist 读取
@@ -1104,7 +1113,7 @@ static CFPropertyListRef hooked_CFPreferencesCopyAppValue(CFStringRef key, CFStr
 }
 
 static Boolean hooked_CFPreferencesAppSynchronize(CFStringRef applicationID) {
-    if (_dkStartupGuard) return original_CFPreferencesAppSynchronize(applicationID);
+    if (DKShouldUseOriginalCFPreferences()) return original_CFPreferencesAppSynchronize(applicationID);
     NSMutableDictionary *dict = DKCFPreferencesLoad();
     if (dict) {
         // 非默认账号：plist 已在写入时同步，这里直接返回 true
@@ -1126,7 +1135,7 @@ static Boolean hooked_CFPreferencesAppSynchronize(CFStringRef applicationID) {
 
 static void hooked_CFPreferencesSetValue(CFStringRef key, CFPropertyListRef value,
                                           CFStringRef applicationID, CFStringRef userName, CFStringRef hostName) {
-    if (_dkStartupGuard) {
+    if (DKShouldUseOriginalCFPreferences()) {
         original_CFPreferencesSetValue(key, value, applicationID, userName, hostName);
         return;
     }
@@ -1148,7 +1157,7 @@ static void hooked_CFPreferencesSetValue(CFStringRef key, CFPropertyListRef valu
 
 static CFPropertyListRef hooked_CFPreferencesCopyValue(CFStringRef key,
                                                         CFStringRef applicationID, CFStringRef userName, CFStringRef hostName) {
-    if (_dkStartupGuard) return original_CFPreferencesCopyValue(key, applicationID, userName, hostName);
+    if (DKShouldUseOriginalCFPreferences()) return original_CFPreferencesCopyValue(key, applicationID, userName, hostName);
     NSMutableDictionary *dict = DKCFPreferencesLoad();
     if (dict) {
         // 非默认账号：从独立 plist 读取
@@ -1166,7 +1175,7 @@ static CFPropertyListRef hooked_CFPreferencesCopyValue(CFStringRef key,
 
 static Boolean hooked_CFPreferencesSynchronize(CFStringRef applicationID,
                                                 CFStringRef userName, CFStringRef hostName) {
-    if (_dkStartupGuard) return original_CFPreferencesSynchronize(applicationID, userName, hostName);
+    if (DKShouldUseOriginalCFPreferences()) return original_CFPreferencesSynchronize(applicationID, userName, hostName);
     NSMutableDictionary *dict = DKCFPreferencesLoad();
     if (dict) {
         // 非默认账号：plist 已在写入时同步，直接返回 true
@@ -1177,7 +1186,7 @@ static Boolean hooked_CFPreferencesSynchronize(CFStringRef applicationID,
 
 static CFArrayRef hooked_CFPreferencesCopyKeyList(CFStringRef applicationID,
                                                    CFStringRef userName, CFStringRef hostName) {
-    if (_dkStartupGuard) return original_CFPreferencesCopyKeyList(applicationID, userName, hostName);
+    if (DKShouldUseOriginalCFPreferences()) return original_CFPreferencesCopyKeyList(applicationID, userName, hostName);
     NSMutableDictionary *dict = DKCFPreferencesLoad();
     if (dict) {
         // 非默认账号：从独立 plist 读取所有 key
@@ -1191,7 +1200,7 @@ static CFArrayRef hooked_CFPreferencesCopyKeyList(CFStringRef applicationID,
 
 static void hooked_CFPreferencesSetMultiple(CFDictionaryRef keysToSet, CFArrayRef keysToRemove,
                                              CFStringRef applicationID, CFStringRef userName, CFStringRef hostName) {
-    if (_dkStartupGuard) {
+    if (DKShouldUseOriginalCFPreferences()) {
         original_CFPreferencesSetMultiple(keysToSet, keysToRemove, applicationID, userName, hostName);
         return;
     }
@@ -1216,7 +1225,7 @@ static void hooked_CFPreferencesSetMultiple(CFDictionaryRef keysToSet, CFArrayRe
 
 static CFDictionaryRef hooked_CFPreferencesCopyMultiple(CFArrayRef keysToFetch,
                                                          CFStringRef applicationID, CFStringRef userName, CFStringRef hostName) {
-    if (_dkStartupGuard) return original_CFPreferencesCopyMultiple(keysToFetch, applicationID, userName, hostName);
+    if (DKShouldUseOriginalCFPreferences()) return original_CFPreferencesCopyMultiple(keysToFetch, applicationID, userName, hostName);
     NSMutableDictionary *dict = DKCFPreferencesLoad();
     if (dict) {
         // 非默认账号：从独立 plist 批量读取
