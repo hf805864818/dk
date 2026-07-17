@@ -1,6 +1,7 @@
 #import "DKAccountManager.h"
 #import "DKDataIsolation.h"
 #import "DKNetworkSessionManager.h"
+#import "DKAppDataManager.h"
 #import <UIKit/UIKit.h>
 #import <Security/Security.h>
 #import <unistd.h>
@@ -431,6 +432,19 @@ static NSString *_accountsRootPath = nil;
                 // 通知数据隔离层刷新
                 [[DKDataIsolation sharedInstance] setup];
 
+                // ============================================================
+                // 目录级数据搬移（借鉴 Crane 容器级隔离思路）
+                // 将当前 App 沙盒的 Library/ 和 Documents/ 搬移到旧账号备份，
+                // 再将目标账号的备份搬移回 App 沙盒。
+                // 这能捕获 MMKV、WCDB 等绕过 API Hook 的 C++ 存储引擎数据。
+                // ============================================================
+                if (![oldAccount isEqualToString:name]) {
+                    // 1. 将当前 App 数据搬移到旧账号备份
+                    [[DKAppDataManager sharedManager] moveAppDataToAccount:oldAccount];
+                    // 2. 将目标账号数据搬移回 App 沙盒
+                    [[DKAppDataManager sharedManager] moveAccountDataToApp:name];
+                }
+
                 // 发送账号切换通知
                 [[NSNotificationCenter defaultCenter] postNotificationName:@"DKAccountDidChangeNotification"
                                                                     object:nil
@@ -439,16 +453,17 @@ static NSString *_accountsRootPath = nil;
 
                 NSLog(@"[DK] 账号切换完成: %@ -> %@，即将退出应用", oldAccount, name);
 
-                // 在 exit(0) 之前强制刷新所有数据到磁盘。
-                // Keychain 操作是同步的，NSUserDefaults 已调用 synchronize，
-                // 但 NSHTTPCookieStorage 的 setCookie: 是异步写盘的。
-                // 若不刷新，Cookie 可能丢失，导致下次启动时进入登录页。
-                sync();  // 刷新所有文件系统缓冲区
+                // 在退出前同步 NSUserDefaults
                 [[NSUserDefaults standardUserDefaults] synchronize];
 
-                // 延迟退出让 RunLoop 有机会处理异步操作（Cookie 持久化等）
+                // 延迟退出让 RunLoop 有机会处理异步操作（Cookie 持久化等），
+                // 延迟结束后再次 sync() 刷新所有文件系统缓冲区再退出
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
                                dispatch_get_main_queue(), ^{
+                    // 退出前再次强制刷新所有数据到磁盘。
+                    // sync() 放在这里（而非 dispatch_after 之前），确保
+                    // 0.5s 延迟期间的任何异步写入也被刷盘。
+                    sync();
                     // 退出应用，让用户重新打开后以新账号运行
                     exit(0);
                 });

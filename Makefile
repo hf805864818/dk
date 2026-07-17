@@ -29,7 +29,7 @@ dk_FILES = Tweak.x \
            DKAccountManager.m \
            DKAccountUI.m \
            DKDataIsolation.m \
-           DKFileManagerHook.m \
+           DKAppDataManager.m \
            DKUserDefaultsHook.m \
            DKKeychainHook.m \
            DKNetworkSessionManager.m \

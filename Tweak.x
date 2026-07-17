@@ -22,7 +22,6 @@
 #import "DKAccountManager.h"
 #import "DKAccountUI.h"
 #import "DKDataIsolation.h"
-#import "DKFileManagerHook.h"
 #import "DKUserDefaultsHook.h"
 #import "DKKeychainHook.h"
 #import "DKNetworkSessionManager.h"
@@ -38,20 +37,6 @@
 #ifndef DK_BUILD_TIME
 #define DK_BUILD_TIME @"unknown"
 #endif
-
-// ============================================================
-// 路径映射工具函数声明
-// ============================================================
-extern NSString* DKRemapFilePath(NSString *path);
-extern NSURL* DKRemapFileURL(NSURL *url);
-extern void DKSyncAccountUserDefaults(void);
-extern id DKReadAccountUserDefault(NSString *key);
-extern void DKWriteAccountUserDefault(NSString *key, id value);
-extern NSDictionary* DKReadAccountUserDefaultsDictionary(void);
-extern NSDictionary* DKRemapKeychainQuery(NSDictionary *query);
-extern NSDictionary* DKRemapKeychainAttributes(NSDictionary *attributes);
-extern NSDictionary* DKUnmapKeychainResult(NSDictionary *result);
-extern BOOL DKKeychainResultMatchesCurrentAccount(NSDictionary *result);
 
 // ============================================================
 // 获取当前应用的 Bundle ID
@@ -83,32 +68,6 @@ static OSStatus hooked_SecItemAdd(CFDictionaryRef query, CFTypeRef *result);
 static OSStatus hooked_SecItemCopyMatching(CFDictionaryRef query, CFTypeRef *result);
 static OSStatus hooked_SecItemUpdate(CFDictionaryRef query, CFDictionaryRef attributesToUpdate);
 static OSStatus hooked_SecItemDelete(CFDictionaryRef query);
-
-// ============================================================
-// POSIX 文件 I/O Hook 前向声明（fishhook）
-// TRAE 使用 WCDB/MMKV 等 C++ 存储引擎，底层直接调用
-// open()/fopen()/stat()/access()/openat()，ObjC 层 %hook 无法拦截。
-// 必须用 fishhook 重定向这些 C 函数，否则子账号会读取默认账号的数据库文件。
-// ============================================================
-static BOOL _dk_fopen_hook_guard = NO;
-FILE* (*original_fopen)(const char *path, const char *mode);
-FILE* hooked_fopen(const char *path, const char *mode);
-
-static BOOL _dk_open_hook_guard = NO;
-int (*original_open)(const char *path, int flags, mode_t mode);
-int hooked_open(const char *path, int flags, mode_t mode);
-
-static BOOL _dk_stat_hook_guard = NO;
-int (*original_stat)(const char *path, struct stat *buf);
-int hooked_stat(const char *path, struct stat *buf);
-
-static BOOL _dk_access_hook_guard = NO;
-int (*original_access)(const char *path, int mode);
-int hooked_access(const char *path, int mode);
-
-static BOOL _dk_openat_hook_guard = NO;
-int (*original_openat)(int fd, const char *path, int flags, mode_t mode);
-int hooked_openat(int fd, const char *path, int flags, mode_t mode);
 
 // ============================================================
 // CFPreferences C 函数 Hook 前向声明
@@ -171,295 +130,6 @@ static void DKCFPreferencesSave(NSMutableDictionary *dict) {
                                                     error:nil];
     [dict writeToFile:path atomically:YES];
 }
-
-// ============================================================
-// Hook 1: NSFileManager - 文件路径重定向
-// 拦截所有文件操作，将路径映射到当前账号数据目录
-// ============================================================
-
-%hook NSFileManager
-
-- (BOOL)fileExistsAtPath:(NSString *)path {
-    NSString *mappedPath = DKRemapFilePath(path);
-    return %orig(mappedPath);
-}
-
-- (BOOL)fileExistsAtPath:(NSString *)path isDirectory:(BOOL *)isDirectory {
-    NSString *mappedPath = DKRemapFilePath(path);
-    return %orig(mappedPath, isDirectory);
-}
-
-- (BOOL)isReadableFileAtPath:(NSString *)path {
-    NSString *mappedPath = DKRemapFilePath(path);
-    return %orig(mappedPath);
-}
-
-- (BOOL)isWritableFileAtPath:(NSString *)path {
-    NSString *mappedPath = DKRemapFilePath(path);
-    return %orig(mappedPath);
-}
-
-- (BOOL)isExecutableFileAtPath:(NSString *)path {
-    NSString *mappedPath = DKRemapFilePath(path);
-    return %orig(mappedPath);
-}
-
-- (BOOL)isDeletableFileAtPath:(NSString *)path {
-    NSString *mappedPath = DKRemapFilePath(path);
-    return %orig(mappedPath);
-}
-
-- (BOOL)createFileAtPath:(NSString *)path contents:(NSData *)contents attributes:(NSDictionary *)attributes {
-    NSString *mappedPath = DKRemapFilePath(path);
-    return %orig(mappedPath, contents, attributes);
-}
-
-- (BOOL)createDirectoryAtPath:(NSString *)path withIntermediateDirectories:(BOOL)createIntermediates attributes:(NSDictionary *)attributes error:(NSError **)error {
-    NSString *mappedPath = DKRemapFilePath(path);
-    return %orig(mappedPath, createIntermediates, attributes, error);
-}
-
-- (NSArray *)contentsOfDirectoryAtPath:(NSString *)path error:(NSError **)error {
-    NSString *mappedPath = DKRemapFilePath(path);
-    return %orig(mappedPath, error);
-}
-
-- (NSArray *)subpathsOfDirectoryAtPath:(NSString *)path error:(NSError **)error {
-    NSString *mappedPath = DKRemapFilePath(path);
-    return %orig(mappedPath, error);
-}
-
-- (NSDictionary *)attributesOfItemAtPath:(NSString *)path error:(NSError **)error {
-    NSString *mappedPath = DKRemapFilePath(path);
-    return %orig(mappedPath, error);
-}
-
-- (BOOL)copyItemAtPath:(NSString *)srcPath toPath:(NSString *)dstPath error:(NSError **)error {
-    NSString *mappedSrc = DKRemapFilePath(srcPath);
-    NSString *mappedDst = DKRemapFilePath(dstPath);
-    return %orig(mappedSrc, mappedDst, error);
-}
-
-- (BOOL)moveItemAtPath:(NSString *)srcPath toPath:(NSString *)dstPath error:(NSError **)error {
-    NSString *mappedSrc = DKRemapFilePath(srcPath);
-    NSString *mappedDst = DKRemapFilePath(dstPath);
-    return %orig(mappedSrc, mappedDst, error);
-}
-
-- (BOOL)removeItemAtPath:(NSString *)path error:(NSError **)error {
-    NSString *mappedPath = DKRemapFilePath(path);
-    return %orig(mappedPath, error);
-}
-
-- (BOOL)linkItemAtPath:(NSString *)srcPath toPath:(NSString *)dstPath error:(NSError **)error {
-    NSString *mappedSrc = DKRemapFilePath(srcPath);
-    NSString *mappedDst = DKRemapFilePath(dstPath);
-    return %orig(mappedSrc, mappedDst, error);
-}
-
-- (NSData *)contentsAtPath:(NSString *)path {
-    NSString *mappedPath = DKRemapFilePath(path);
-    return %orig(mappedPath);
-}
-
-- (BOOL)setAttributes:(NSDictionary *)attributes ofItemAtPath:(NSString *)path error:(NSError **)error {
-    NSString *mappedPath = DKRemapFilePath(path);
-    return %orig(attributes, mappedPath, error);
-}
-
-- (NSString *)destinationOfSymbolicLinkAtPath:(NSString *)path error:(NSError **)error {
-    NSString *mappedPath = DKRemapFilePath(path);
-    return %orig(mappedPath, error);
-}
-
-- (NSDirectoryEnumerator *)enumeratorAtPath:(NSString *)path {
-    NSString *mappedPath = DKRemapFilePath(path);
-    return %orig(mappedPath);
-}
-
-%end
-
-// ============================================================
-// Hook 1.5: NSData / NSDictionary / NSArray / NSString / NSPropertyListSerialization
-// 文件读写重定向 — 这些是 iOS 应用最常用的文件读写 API
-// NSFileManager Hook 只拦截了部分操作，这些类方法也必须 Hook
-// ============================================================
-
-%hook NSData
-
-+ (instancetype)dataWithContentsOfFile:(NSString *)path {
-    return %orig(DKRemapFilePath(path));
-}
-
-- (instancetype)initWithContentsOfFile:(NSString *)path {
-    return %orig(DKRemapFilePath(path));
-}
-
-- (BOOL)writeToFile:(NSString *)path atomically:(BOOL)atomically {
-    return %orig(DKRemapFilePath(path), atomically);
-}
-
-- (BOOL)writeToFile:(NSString *)path options:(NSDataWritingOptions)writeOptionsMask error:(NSError **)errorPtr {
-    return %orig(DKRemapFilePath(path), writeOptionsMask, errorPtr);
-}
-
-// NSURL 方法
-+ (instancetype)dataWithContentsOfURL:(NSURL *)url {
-    return %orig(DKRemapFileURL(url));
-}
-
-- (instancetype)initWithContentsOfURL:(NSURL *)url {
-    return %orig(DKRemapFileURL(url));
-}
-
-- (BOOL)writeToURL:(NSURL *)url atomically:(BOOL)atomically {
-    return %orig(DKRemapFileURL(url), atomically);
-}
-
-- (BOOL)writeToURL:(NSURL *)url options:(NSDataWritingOptions)writeOptionsMask error:(NSError **)errorPtr {
-    return %orig(DKRemapFileURL(url), writeOptionsMask, errorPtr);
-}
-
-%end
-
-%hook NSDictionary
-
-+ (NSDictionary *)dictionaryWithContentsOfFile:(NSString *)path {
-    return %orig(DKRemapFilePath(path));
-}
-
-- (BOOL)writeToFile:(NSString *)path atomically:(BOOL)atomically {
-    return %orig(DKRemapFilePath(path), atomically);
-}
-
-// NSURL 方法
-+ (NSDictionary *)dictionaryWithContentsOfURL:(NSURL *)url {
-    return %orig(DKRemapFileURL(url));
-}
-
-- (BOOL)writeToURL:(NSURL *)url atomically:(BOOL)atomically {
-    return %orig(DKRemapFileURL(url), atomically);
-}
-
-%end
-
-%hook NSArray
-
-+ (NSArray *)arrayWithContentsOfFile:(NSString *)path {
-    return %orig(DKRemapFilePath(path));
-}
-
-- (BOOL)writeToFile:(NSString *)path atomically:(BOOL)atomically {
-    return %orig(DKRemapFilePath(path), atomically);
-}
-
-// NSURL 方法
-+ (NSArray *)arrayWithContentsOfURL:(NSURL *)url {
-    return %orig(DKRemapFileURL(url));
-}
-
-- (BOOL)writeToURL:(NSURL *)url atomically:(BOOL)atomically {
-    return %orig(DKRemapFileURL(url), atomically);
-}
-
-%end
-
-%hook NSString
-
-+ (instancetype)stringWithContentsOfFile:(NSString *)path encoding:(NSStringEncoding)enc error:(NSError **)error {
-    return %orig(DKRemapFilePath(path), enc, error);
-}
-
-- (instancetype)initWithContentsOfFile:(NSString *)path encoding:(NSStringEncoding)enc error:(NSError **)error {
-    return %orig(DKRemapFilePath(path), enc, error);
-}
-
-- (BOOL)writeToFile:(NSString *)path atomically:(BOOL)atomically encoding:(NSStringEncoding)enc error:(NSError **)error {
-    return %orig(DKRemapFilePath(path), atomically, enc, error);
-}
-
-// NSURL 方法
-+ (instancetype)stringWithContentsOfURL:(NSURL *)url encoding:(NSStringEncoding)enc error:(NSError **)error {
-    return %orig(DKRemapFileURL(url), enc, error);
-}
-
-- (instancetype)initWithContentsOfURL:(NSURL *)url encoding:(NSStringEncoding)enc error:(NSError **)error {
-    return %orig(DKRemapFileURL(url), enc, error);
-}
-
-- (BOOL)writeToURL:(NSURL *)url atomically:(BOOL)atomically encoding:(NSStringEncoding)enc error:(NSError **)error {
-    return %orig(DKRemapFileURL(url), atomically, enc, error);
-}
-
-%end
-
-%hook NSPropertyListSerialization
-
-+ (id)propertyListWithData:(NSData *)data options:(NSPropertyListReadOptions)opt format:(NSPropertyListFormat *)format error:(NSError **)error {
-    return %orig(data, opt, format, error);
-}
-
-+ (NSData *)dataWithPropertyList:(id)plist format:(NSPropertyListFormat)format options:(NSPropertyListWriteOptions)opt error:(NSError **)error {
-    return %orig(plist, format, opt, error);
-}
-
-%end
-
-// ============================================================
-// Hook 1.6: NSFileHandle — 底层文件读写
-// 拦截 NSFileHandle 的文件操作（Flutter 可能使用此 API）
-// ============================================================
-
-%hook NSFileHandle
-
-// 已弃用但可能仍在使用
-+ (instancetype)fileHandleForReadingAtPath:(NSString *)path {
-    return %orig(DKRemapFilePath(path));
-}
-
-+ (instancetype)fileHandleForWritingAtPath:(NSString *)path {
-    return %orig(DKRemapFilePath(path));
-}
-
-+ (instancetype)fileHandleForUpdatingAtPath:(NSString *)path {
-    return %orig(DKRemapFilePath(path));
-}
-
-// 现代 API
-+ (instancetype)fileHandleForReadingFromURL:(NSURL *)url error:(NSError **)error {
-    return %orig(DKRemapFileURL(url), error);
-}
-
-+ (instancetype)fileHandleForWritingToURL:(NSURL *)url error:(NSError **)error {
-    return %orig(DKRemapFileURL(url), error);
-}
-
-+ (instancetype)fileHandleForUpdatingURL:(NSURL *)url error:(NSError **)error {
-    return %orig(DKRemapFileURL(url), error);
-}
-
-%end
-
-// ============================================================
-// Hook 1.7: NSKeyedUnarchiver / NSKeyedArchiver — 序列化持久化
-// 拦截归档/解归档的文件操作
-// ============================================================
-
-%hook NSKeyedUnarchiver
-
-+ (id)unarchiveObjectWithFile:(NSString *)path {
-    return %orig(DKRemapFilePath(path));
-}
-
-%end
-
-%hook NSKeyedArchiver
-
-+ (BOOL)archiveRootObject:(id)rootObject toFile:(NSString *)path {
-    return %orig(rootObject, DKRemapFilePath(path));
-}
-
-%end
 
 // ============================================================
 // Hook 2: NSUserDefaults - 配置隔离
@@ -656,6 +326,45 @@ static BOOL DKShouldUseOriginalDefaults(void) {
     }
     // 非默认账号下忽略 resetStandardUserDefaults，保护原始数据
     NSLog(@"[DK] 拦截 resetStandardUserDefaults（当前账号：%@）", currentAccount);
+}
+
+// 拦截域级别的读取操作。
+// TTAccountSDK 可能通过 persistentDomainForName: 直接读取整个
+// UserDefaults 域，此方法未被之前的 Hook 覆盖，导致子账号读到
+// 原始 cfprefsd 的数据（而非隔离 plist）。
+- (NSDictionary *)persistentDomainForName:(NSString *)domainName {
+    if (DKShouldUseOriginalDefaults()) {
+        return %orig;
+    }
+    // 非默认账号：从账号独立 plist 读取全部数据
+    NSDictionary *accountDict = DKReadAccountUserDefaultsDictionary();
+    return accountDict ?: @{};
+}
+
+// 拦截域级别的写入操作。
+// setPersistentDomain:forName: 会批量写入整个域，若不拦截，
+// 子账号的数据会被写入原始 cfprefsd，污染默认账号数据。
+- (void)setPersistentDomain:(NSDictionary *)domain forName:(NSString *)domainName {
+    if (DKShouldUseOriginalDefaults()) {
+        %orig;
+        return;
+    }
+    // 非默认账号：将所有键值写入账号独立 plist
+    for (NSString *key in domain) {
+        DKWriteAccountUserDefault(key, domain[key]);
+    }
+}
+
+// 拦截域级别的删除操作。
+// removePersistentDomainForName: 会删除整个域。
+// 若不拦截，子账号会删除原始 cfprefsd 的默认账号数据。
+- (void)removePersistentDomainForName:(NSString *)domainName {
+    if (DKShouldUseOriginalDefaults()) {
+        %orig;
+        return;
+    }
+    // 非默认账号：清空账号独立 plist
+    DKClearAccountUserDefaults();
 }
 
 %end
@@ -999,15 +708,9 @@ didReceiveNotificationResponse:(UNNotificationResponse *)response
             {"CFPreferencesCopyKeyList",    hooked_CFPreferencesCopyKeyList,    (void **)&original_CFPreferencesCopyKeyList},
             {"CFPreferencesSetMultiple",    hooked_CFPreferencesSetMultiple,    (void **)&original_CFPreferencesSetMultiple},
             {"CFPreferencesCopyMultiple",   hooked_CFPreferencesCopyMultiple,   (void **)&original_CFPreferencesCopyMultiple},
-            // POSIX 文件 I/O（5 个）— WCDB/MMKV 底层依赖
-            {"fopen",   hooked_fopen,   (void **)&original_fopen},
-            {"open",    hooked_open,    (void **)&original_open},
-            {"stat",    hooked_stat,    (void **)&original_stat},
-            {"access",  hooked_access,  (void **)&original_access},
-            {"openat",  hooked_openat,  (void **)&original_openat},
         };
         rebind_symbols(rebindings, sizeof(rebindings) / sizeof(struct rebinding));
-        NSLog(@"[DK] fishhook C 函数 Hook 已安装（18 个：Keychain 4 + CFPreferences 9 + POSIX 5）");
+        NSLog(@"[DK] fishhook C 函数 Hook 已安装（13 个：Keychain 4 + CFPreferences 9）");
 
         // ============================================
         // 第三步：关闭启动保护
@@ -1024,7 +727,6 @@ didReceiveNotificationResponse:(UNNotificationResponse *)response
             static dispatch_once_t onceToken;
             dispatch_once(&onceToken, ^{
                 [[DKDataIsolation sharedInstance] setup];
-                [[DKFileManagerHook sharedInstance] install];
                 [[DKUserDefaultsHook sharedInstance] install];
                 [[DKKeychainHook sharedInstance] install];
                 [[DKNetworkSessionManager sharedManager] setup];
@@ -1063,98 +765,6 @@ didReceiveNotificationResponse:(UNNotificationResponse *)response
         [[DKNetworkSessionManager sharedManager] saveCurrentSession];
         NSLog(@"[DK] DK Multi-Account Tweak 已卸载");
     }
-}
-
-// ============================================================
-// POSIX 文件 I/O Hook 实现（fishhook）
-// WCDB/MMKV 等 C++ 存储引擎直接调用这些 C 函数，
-// ObjC 层的 NSFileManager/NSData 等 %hook 无法拦截。
-// 所有实现都加了 _dkStartupGuard 保护，启动恢复期间透传。
-// ============================================================
-
-FILE* hooked_fopen(const char *path, const char *mode) {
-    if (_dkStartupGuard) return original_fopen(path, mode);
-    if (_dk_fopen_hook_guard) return original_fopen(path, mode);
-    _dk_fopen_hook_guard = YES;
-
-    FILE *result = NULL;
-    if (path) {
-        NSString *nsPath = [NSString stringWithUTF8String:path];
-        NSString *remapped = DKRemapFilePath(nsPath);
-        result = original_fopen(remapped ? [remapped UTF8String] : path, mode);
-    } else {
-        result = original_fopen(path, mode);
-    }
-    _dk_fopen_hook_guard = NO;
-    return result;
-}
-
-int hooked_open(const char *path, int flags, mode_t mode) {
-    if (_dkStartupGuard) return original_open(path, flags, mode);
-    if (_dk_open_hook_guard) return original_open(path, flags, mode);
-    _dk_open_hook_guard = YES;
-
-    int result = -1;
-    if (path) {
-        NSString *nsPath = [NSString stringWithUTF8String:path];
-        NSString *remapped = DKRemapFilePath(nsPath);
-        result = original_open(remapped ? [remapped UTF8String] : path, flags, mode);
-    } else {
-        result = original_open(path, flags, mode);
-    }
-    _dk_open_hook_guard = NO;
-    return result;
-}
-
-int hooked_stat(const char *path, struct stat *buf) {
-    if (_dkStartupGuard) return original_stat(path, buf);
-    if (_dk_stat_hook_guard) return original_stat(path, buf);
-    _dk_stat_hook_guard = YES;
-
-    int result = -1;
-    if (path) {
-        NSString *nsPath = [NSString stringWithUTF8String:path];
-        NSString *remapped = DKRemapFilePath(nsPath);
-        result = original_stat(remapped ? [remapped UTF8String] : path, buf);
-    } else {
-        result = original_stat(path, buf);
-    }
-    _dk_stat_hook_guard = NO;
-    return result;
-}
-
-int hooked_access(const char *path, int mode) {
-    if (_dkStartupGuard) return original_access(path, mode);
-    if (_dk_access_hook_guard) return original_access(path, mode);
-    _dk_access_hook_guard = YES;
-
-    int result = -1;
-    if (path) {
-        NSString *nsPath = [NSString stringWithUTF8String:path];
-        NSString *remapped = DKRemapFilePath(nsPath);
-        result = original_access(remapped ? [remapped UTF8String] : path, mode);
-    } else {
-        result = original_access(path, mode);
-    }
-    _dk_access_hook_guard = NO;
-    return result;
-}
-
-int hooked_openat(int fd, const char *path, int flags, mode_t mode) {
-    if (_dkStartupGuard) return original_openat(fd, path, flags, mode);
-    if (_dk_openat_hook_guard) return original_openat(fd, path, flags, mode);
-    _dk_openat_hook_guard = YES;
-
-    int result = -1;
-    if (path) {
-        NSString *nsPath = [NSString stringWithUTF8String:path];
-        NSString *remapped = DKRemapFilePath(nsPath);
-        result = original_openat(fd, remapped ? [remapped UTF8String] : path, flags, mode);
-    } else {
-        result = original_openat(fd, path, flags, mode);
-    }
-    _dk_openat_hook_guard = NO;
-    return result;
 }
 
 // ============================================================

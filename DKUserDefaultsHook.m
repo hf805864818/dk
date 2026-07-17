@@ -178,3 +178,17 @@ void DKSyncAccountUserDefaults(void) {
         }
     }
 }
+
+// 清空当前账号的 UserDefaults 独立 plist
+void DKClearAccountUserDefaults(void) {
+    DKAccountManager *manager = [DKAccountManager sharedManager];
+    NSString *currentAccount = [manager currentAccountName];
+    
+    if ([currentAccount isEqualToString:[manager defaultAccountName]]) return;
+    
+    NSString *plistPath = _DKGetAccountPlistPath();
+    if (plistPath) {
+        [@{} writeToFile:plistPath atomically:YES];
+        NSLog(@"[DK] 已清空账号 %@ 的 UserDefaults 独立 plist", currentAccount);
+    }
+}

@@ -27,3 +27,6 @@ NSDictionary* DKReadAccountUserDefaultsDictionary(void);
 
 // 同步账号的 UserDefaults 到文件
 void DKSyncAccountUserDefaults(void);
+
+// 清空当前账号的 UserDefaults 独立 plist（用于 removePersistentDomainForName: Hook）
+void DKClearAccountUserDefaults(void);
