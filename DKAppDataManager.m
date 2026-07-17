@@ -312,9 +312,37 @@
     NSLog(@"[DK] 已清理账号 %@ 的备份数据", accountName);
 }
 
-#pragma mark - 数据所有权标记
-
 static NSString *const kDKLibraryOwnerFile = @".dk_library_owner";
+
+#pragma mark - 递归删除工具
+
+/// 递归删除目录内容（不删除目录本身）。
+/// 先删除文件，再递归进入子目录。单文件/空目录的 removeItemAtPath 在 %ctor 阶段必定成功。
+/// 这与 rename() 不同：rename() 在 iOS 上可能因沙箱限制失败，
+/// 但 removeItemAtPath 针对单个文件/空目录总是可行的。
+- (void)_recursiveDeleteContentsOfDirectory:(NSString *)dirPath {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSArray *contents = [fm contentsOfDirectoryAtPath:dirPath error:nil];
+    if (!contents) return;
+
+    for (NSString *item in contents) {
+        // 跳过所有权标记文件（后续会重新写入）
+        if ([item isEqualToString:kDKLibraryOwnerFile]) continue;
+
+        NSString *itemPath = [dirPath stringByAppendingPathComponent:item];
+        BOOL isDir = NO;
+        [fm fileExistsAtPath:itemPath isDirectory:&isDir];
+
+        if (isDir) {
+            [self _recursiveDeleteContentsOfDirectory:itemPath];
+            [fm removeItemAtPath:itemPath error:nil];
+        } else {
+            [fm removeItemAtPath:itemPath error:nil];
+        }
+    }
+}
+
+#pragma mark - 数据所有权标记
 
 - (void)_writeLibraryOwner:(NSString *)accountName {
     NSString *ownerPath = [[self appHomePath] stringByAppendingPathComponent:
@@ -359,9 +387,15 @@ static NSString *const kDKLibraryOwnerFile = @".dk_library_owner";
     }
 
     // ============================================================
-    // 所有权不匹配：在 %ctor 中执行原子交换。
-    // 此时 App 尚未初始化，MMKV/WCDB 等库未打开任何文件，
-    // rename() 整个 Library/ 目录必定成功。
+    // 所有权不匹配：在 %ctor 中执行数据交换。
+    // 此时 App 尚未初始化，MMKV/WCDB 等库未打开任何文件。
+    //
+    // 策略：
+    //   1. 先尝试 rename() 整个 Library/（最快，只改 inode 指针）
+    //   2. rename() 失败时，用递归删除清空 Library/ 内容
+    //      （不依赖 _moveSubdirectories，因为 rename 子目录也可能失败，
+    //        且 removeItemAtPath 对非空目录静默失败）
+    //   3. 创建空目录结构或恢复目标账号数据
     // ============================================================
     NSString *sandboxLib = [[self appHomePath] stringByAppendingPathComponent:@"Library"];
     NSString *oldOwner = owner ?: defaultAccount;
@@ -371,18 +405,16 @@ static NSString *const kDKLibraryOwnerFile = @".dk_library_owner";
     NSString *oldBackup = [self backupRootPathForAccount:oldOwner];
     NSString *oldBackupLib = [oldBackup stringByAppendingPathComponent:@"Library"];
 
-    // 确保父目录存在
     [fm createDirectoryAtPath:oldBackup
   withIntermediateDirectories:YES
                    attributes:@{NSFileProtectionKey: NSFileProtectionNone}
                         error:nil];
 
-    // 如果旧备份已存在，用 rename 挪开（避免 removeItemAtPath 失败）
+    // 如果旧备份已存在，挪开
     if ([fm fileExistsAtPath:oldBackupLib]) {
         NSString *tmpLib = [oldBackupLib stringByAppendingString:@".tmp"];
         [fm removeItemAtPath:tmpLib error:nil];
         rename([oldBackupLib fileSystemRepresentation], [tmpLib fileSystemRepresentation]);
-        // 异步清理
         dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0), ^{
             [[NSFileManager defaultManager] removeItemAtPath:tmpLib error:nil];
         });
@@ -391,12 +423,33 @@ static NSString *const kDKLibraryOwnerFile = @".dk_library_owner";
     const char *srcPath = [sandboxLib fileSystemRepresentation];
     const char *dstPath = [oldBackupLib fileSystemRepresentation];
 
-    if (rename(srcPath, dstPath) == 0) {
+    BOOL renameSucceeded = (rename(srcPath, dstPath) == 0);
+
+    if (renameSucceeded) {
         NSLog(@"[DK] ✅ rename Library/ → 「%@」备份", oldOwner);
     } else {
-        NSLog(@"[DK] ⚠️ rename Library/ 失败 (errno=%d), 逐个子目录搬移", errno);
+        // ============================================================
+        // rename() 失败：改用递归删除 + 重建策略。
+        //
+        // 为什么不用 _moveSubdirectories？
+        //   _moveSubdirectories 内部也用 rename() 逐个子目录搬移，
+        //   如果整目录 rename 失败，子目录 rename 大概率也失败。
+        //   且失败后 removeItemAtPath 对非空目录静默失败，
+        //   导致旧数据残留。
+        //
+        // 递归删除为什么可靠？
+        //   %ctor 阶段 App 未初始化，所有文件空闲。
+        //   先递归删除子目录内容 → 空目录 → removeItemAtPath 成功。
+        //   文件 removeItemAtPath 在无 fd 占用时必定成功。
+        // ============================================================
+        NSLog(@"[DK] ⚠️ rename Library/ 失败 (errno=%d), 改用递归删除策略", errno);
+
+        // 先尝试把能搬的子目录搬走（保底备份）
         [self _moveSubdirectories:sandboxLib toDirectory:oldBackupLib];
-        [fm removeItemAtPath:sandboxLib error:nil];
+
+        // 递归删除 Library/ 中残留的所有内容
+        [self _recursiveDeleteContentsOfDirectory:sandboxLib];
+        NSLog(@"[DK] 递归删除 Library/ 内容完成");
     }
 
     // Step 2: 恢复目标账号数据或创建空目录
@@ -413,16 +466,24 @@ static NSString *const kDKLibraryOwnerFile = @".dk_library_owner";
         }
     } else {
         // 新账号无备份：创建空 Library/
-        NSLog(@"[DK] 「%@」无备份，创建空 Library/", currentAccount);
-        [fm createDirectoryAtPath:sandboxLib
-      withIntermediateDirectories:YES
-                       attributes:@{NSFileProtectionKey: NSFileProtectionNone}
-                            error:nil];
-        for (NSString *sub in @[@"Preferences", @"Caches", @"Cookies", @"Application Support"]) {
-            [fm createDirectoryAtPath:[sandboxLib stringByAppendingPathComponent:sub]
+        // 如果 rename 成功，Library/ 已被移走，sandboxLib 不存在。
+        // 如果 rename 失败，Library/ 已被递归清空，sandboxLib 是空目录。
+        // 两种情况下都需要确保子目录存在。
+        if (![fm fileExistsAtPath:sandboxLib]) {
+            [fm createDirectoryAtPath:sandboxLib
           withIntermediateDirectories:YES
                            attributes:@{NSFileProtectionKey: NSFileProtectionNone}
                                 error:nil];
+        }
+        NSLog(@"[DK] 「%@」无备份，创建空目录结构", currentAccount);
+        for (NSString *sub in @[@"Preferences", @"Caches", @"Cookies", @"Application Support"]) {
+            NSString *subPath = [sandboxLib stringByAppendingPathComponent:sub];
+            if (![fm fileExistsAtPath:subPath]) {
+                [fm createDirectoryAtPath:subPath
+              withIntermediateDirectories:YES
+                               attributes:@{NSFileProtectionKey: NSFileProtectionNone}
+                                    error:nil];
+            }
         }
     }
 
