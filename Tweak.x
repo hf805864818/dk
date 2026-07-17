@@ -833,16 +833,119 @@ didReceiveNotificationResponse:(UNNotificationResponse *)response
 // 使用 fishhook rebind_symbols 重定向符号指针（不修改 __TEXT 代码页）
 // ============================================================
 
+static BOOL DKIsNonDefaultKeychainAccount(void) {
+    DKAccountManager *manager = [DKAccountManager sharedManager];
+    NSString *currentAccount = [manager currentAccountName];
+    if ([currentAccount isEqualToString:[manager defaultAccountName]]) {
+        return NO;
+    }
+    NSString *designatedDefault = [manager designatedDefaultAccountName];
+    if (designatedDefault && [currentAccount isEqualToString:designatedDefault]) {
+        return NO;
+    }
+    return YES;
+}
+
+static BOOL DKKeychainQueryHasScopedAttribute(NSDictionary *query) {
+    if (query[(__bridge id)kSecAttrService]) return YES;
+    if (query[(__bridge id)kSecAttrAccount]) return YES;
+    if (query[(__bridge id)kSecAttrLabel]) return YES;
+    if (query[(__bridge id)kSecAttrGeneric]) return YES;
+    return NO;
+}
+
+static NSDictionary *DKKeychainQueryWithSyntheticScopeIfNeeded(NSDictionary *query) {
+    if (!DKIsNonDefaultKeychainAccount()) return query;
+    if (DKKeychainQueryHasScopedAttribute(query)) return query;
+
+    // 某些 SDK 会使用“只按 kSecClass 查询”的宽 Keychain 读写。
+    // 如果不加任何账号归属字段，子账号启动时会读到默认账号 A 的凭证。
+    // 对无 service/account/label/generic 的新增项加一个合成 label，
+    // 之后宽查询会通过过滤逻辑只返回当前账号自己的项。
+    NSString *prefix = [[DKDataIsolation sharedInstance] keychainServicePrefix];
+    if (prefix.length == 0) return query;
+
+    NSMutableDictionary *scoped = [query mutableCopy];
+    scoped[(__bridge id)kSecAttrLabel] = [prefix stringByAppendingString:@"__DK_WIDE_KEYCHAIN_ITEM__"];
+    return scoped;
+}
+
+static id DKKeychainProjectedResultForOriginalQuery(NSDictionary *originalQuery, NSDictionary *matchedItem) {
+    NSDictionary *unmapped = DKUnmapKeychainResult(matchedItem);
+    BOOL wantsData = [originalQuery[(__bridge id)kSecReturnData] boolValue];
+    BOOL wantsAttributes = [originalQuery[(__bridge id)kSecReturnAttributes] boolValue];
+
+    if (wantsData && !wantsAttributes) {
+        id data = matchedItem[(__bridge id)kSecValueData];
+        return data ?: unmapped;
+    }
+    return unmapped;
+}
+
 static OSStatus hooked_SecItemAdd(CFDictionaryRef query, CFTypeRef *result) {
     if (_dkStartupGuard) return original_SecItemAdd(query, result);
     NSDictionary *nsQuery = (__bridge NSDictionary *)query;
-    NSDictionary *mappedQuery = DKRemapKeychainQuery(nsQuery);
+    NSDictionary *scopedQuery = DKKeychainQueryWithSyntheticScopeIfNeeded(nsQuery);
+    NSDictionary *mappedQuery = DKRemapKeychainQuery(scopedQuery);
     return original_SecItemAdd((__bridge CFDictionaryRef)mappedQuery, result);
 }
 
 static OSStatus hooked_SecItemCopyMatching(CFDictionaryRef query, CFTypeRef *result) {
     if (_dkStartupGuard) return original_SecItemCopyMatching(query, result);
     NSDictionary *nsQuery = (__bridge NSDictionary *)query;
+
+    // 非默认账号的宽查询必须特殊处理。
+    // 原实现会直接把查询透传给系统；如果 SDK 只传 kSecClass 而不传
+    // service/account/label/generic，系统会返回默认账号 A 的 Keychain 数据。
+    // 更糟的是很多调用只要求 kSecReturnData，此时返回值是 NSData，
+    // 没有属性可供 DKKeychainResultMatchesCurrentAccount 判断归属。
+    if (DKIsNonDefaultKeychainAccount() && !DKKeychainQueryHasScopedAttribute(nsQuery)) {
+        NSMutableDictionary *fetchQuery = [nsQuery mutableCopy];
+        fetchQuery[(__bridge id)kSecMatchLimit] = (__bridge id)kSecMatchLimitAll;
+        fetchQuery[(__bridge id)kSecReturnAttributes] = @YES;
+        fetchQuery[(__bridge id)kSecReturnData] = @YES;
+
+        CFTypeRef fetchResult = NULL;
+        OSStatus fetchStatus = original_SecItemCopyMatching((__bridge CFDictionaryRef)fetchQuery, &fetchResult);
+        if (fetchStatus != errSecSuccess || !fetchResult) {
+            if (fetchResult) CFRelease(fetchResult);
+            return fetchStatus;
+        }
+
+        NSArray *items = nil;
+        if (CFGetTypeID(fetchResult) == CFArrayGetTypeID()) {
+            items = (__bridge NSArray *)fetchResult;
+        } else if (CFGetTypeID(fetchResult) == CFDictionaryGetTypeID()) {
+            items = @[(__bridge NSDictionary *)fetchResult];
+        }
+
+        NSMutableArray *matchedItems = [NSMutableArray array];
+        for (NSDictionary *item in items) {
+            if (![item isKindOfClass:[NSDictionary class]]) continue;
+            if (DKKeychainResultMatchesCurrentAccount(item)) {
+                [matchedItems addObject:DKKeychainProjectedResultForOriginalQuery(nsQuery, item)];
+            }
+        }
+        CFRelease(fetchResult);
+
+        if (matchedItems.count == 0) {
+            if (result) *result = NULL;
+            return errSecItemNotFound;
+        }
+
+        if (!result) {
+            return errSecSuccess;
+        }
+
+        BOOL wantsAll = (nsQuery[(__bridge id)kSecMatchLimit] == (__bridge id)kSecMatchLimitAll);
+        if (wantsAll) {
+            *result = (__bridge_retained CFTypeRef)matchedItems;
+        } else {
+            *result = (__bridge_retained CFTypeRef)matchedItems.firstObject;
+        }
+        return errSecSuccess;
+    }
+
     NSDictionary *mappedQuery = DKRemapKeychainQuery(nsQuery);
     OSStatus status = original_SecItemCopyMatching((__bridge CFDictionaryRef)mappedQuery, result);
 
@@ -885,7 +988,8 @@ static OSStatus hooked_SecItemCopyMatching(CFDictionaryRef query, CFTypeRef *res
 static OSStatus hooked_SecItemUpdate(CFDictionaryRef query, CFDictionaryRef attributesToUpdate) {
     if (_dkStartupGuard) return original_SecItemUpdate(query, attributesToUpdate);
     NSDictionary *nsQuery = (__bridge NSDictionary *)query;
-    NSDictionary *mappedQuery = DKRemapKeychainQuery(nsQuery);
+    NSDictionary *scopedQuery = DKKeychainQueryWithSyntheticScopeIfNeeded(nsQuery);
+    NSDictionary *mappedQuery = DKRemapKeychainQuery(scopedQuery);
     NSDictionary *nsAttributes = (__bridge NSDictionary *)attributesToUpdate;
     NSDictionary *mappedAttributes = DKRemapKeychainAttributes(nsAttributes);
     return original_SecItemUpdate((__bridge CFDictionaryRef)mappedQuery,
@@ -895,22 +999,18 @@ static OSStatus hooked_SecItemUpdate(CFDictionaryRef query, CFDictionaryRef attr
 static OSStatus hooked_SecItemDelete(CFDictionaryRef query) {
     if (_dkStartupGuard) return original_SecItemDelete(query);
     NSDictionary *nsQuery = (__bridge NSDictionary *)query;
-    DKAccountManager *manager = [DKAccountManager sharedManager];
-    NSString *currentAccount = [manager currentAccountName];
-
-    if (![currentAccount isEqualToString:[manager defaultAccountName]]) {
+    if (DKIsNonDefaultKeychainAccount()) {
         // 非默认账号：检查删除操作是否有可能误删其他账号的 Keychain 项。
-        // 如果查询没有指定 service/account/label，TTAccountSDK
+        // 如果查询没有指定 service/account/label/generic，TTAccountSDK
         // 可能在进行"清空所有 Keychain 数据"操作，必须拦截。
         id service = nsQuery[(__bridge id)kSecAttrService];
         id account = nsQuery[(__bridge id)kSecAttrAccount];
         id label  = nsQuery[(__bridge id)kSecAttrLabel];
+        id generic = nsQuery[(__bridge id)kSecAttrGeneric];
 
-        if (!service && !account && !label) {
+        if (!service && !account && !label && !generic) {
             // 宽泛删除：只允许删除带有当前账号前缀的项。
             // 给查询加上前缀条件，避免误删默认账号或其他子账号的数据。
-            NSMutableDictionary *safeQuery = [nsQuery mutableCopy];
-            NSString *prefix = [[DKDataIsolation sharedInstance] keychainServicePrefix];
             // 由于原始查询没有 service，我们无法直接过滤。
             // 安全策略：拒绝执行这种可能删除所有账号的宽泛操作。
             // 改为先遍历所有匹配项，只删除属于当前账号的。
@@ -925,12 +1025,18 @@ static OSStatus hooked_SecItemDelete(CFDictionaryRef query) {
                 for (NSDictionary *item in items) {
                     NSString *itemService = item[(__bridge id)kSecAttrService];
                     NSString *itemAccount = item[(__bridge id)kSecAttrAccount];
-                    // 只删除带有当前账号前缀的项
-                    if ([itemService hasPrefix:prefix] || [itemAccount hasPrefix:prefix]) {
+                    NSString *itemLabel = item[(__bridge id)kSecAttrLabel];
+                    id itemGeneric = item[(__bridge id)kSecAttrGeneric];
+
+                    // 只删除属于当前账号的项。这里不能只看 service/account，
+                    // 因为宽 Keychain 新增项可能使用合成 label 标记归属。
+                    if (DKKeychainResultMatchesCurrentAccount(item)) {
                         NSMutableDictionary *delQuery = [NSMutableDictionary dictionary];
                         delQuery[(__bridge id)kSecClass] = nsQuery[(__bridge id)kSecClass];
                         if (itemService) delQuery[(__bridge id)kSecAttrService] = itemService;
                         if (itemAccount) delQuery[(__bridge id)kSecAttrAccount] = itemAccount;
+                        if (itemLabel) delQuery[(__bridge id)kSecAttrLabel] = itemLabel;
+                        if (itemGeneric) delQuery[(__bridge id)kSecAttrGeneric] = itemGeneric;
                         original_SecItemDelete((__bridge CFDictionaryRef)delQuery);
                     }
                 }
@@ -940,7 +1046,8 @@ static OSStatus hooked_SecItemDelete(CFDictionaryRef query) {
         }
     }
 
-    NSDictionary *mappedQuery = DKRemapKeychainQuery(nsQuery);
+    NSDictionary *scopedQuery = DKKeychainQueryWithSyntheticScopeIfNeeded(nsQuery);
+    NSDictionary *mappedQuery = DKRemapKeychainQuery(scopedQuery);
     return original_SecItemDelete((__bridge CFDictionaryRef)mappedQuery);
 }
 

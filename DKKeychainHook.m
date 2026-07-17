@@ -42,6 +42,10 @@ NSDictionary* DKRemapKeychainQuery(NSDictionary *query) {
     if ([currentAccount isEqualToString:[manager defaultAccountName]]) {
         return query;
     }
+    NSString *designatedDefault = [manager designatedDefaultAccountName];
+    if (designatedDefault && [currentAccount isEqualToString:designatedDefault]) {
+        return query;
+    }
     
     NSString *prefix = [[DKDataIsolation sharedInstance] keychainServicePrefix];
     if (prefix.length == 0) return query;
@@ -96,6 +100,10 @@ NSDictionary* DKRemapKeychainAttributes(NSDictionary *attributes) {
     if ([currentAccount isEqualToString:[manager defaultAccountName]]) {
         return attributes;
     }
+    NSString *designatedDefault = [manager designatedDefaultAccountName];
+    if (designatedDefault && [currentAccount isEqualToString:designatedDefault]) {
+        return attributes;
+    }
 
     NSString *prefix = [[DKDataIsolation sharedInstance] keychainServicePrefix];
     if (prefix.length == 0) return attributes;
@@ -137,6 +145,10 @@ NSDictionary* DKUnmapKeychainResult(NSDictionary *result) {
     NSString *currentAccount = [manager currentAccountName];
     
     if ([currentAccount isEqualToString:[manager defaultAccountName]]) {
+        return result;
+    }
+    NSString *designatedDefault = [manager designatedDefaultAccountName];
+    if (designatedDefault && [currentAccount isEqualToString:designatedDefault]) {
         return result;
     }
     
@@ -196,12 +208,23 @@ BOOL DKKeychainResultMatchesCurrentAccount(NSDictionary *result) {
         }
         return YES;
     }
+    NSString *designatedDefault = [manager designatedDefaultAccountName];
+    if (designatedDefault && [currentAccount isEqualToString:designatedDefault]) {
+        for (NSString *value in stringValues) {
+            if ([value hasPrefix:@"DK_"]) {
+                return NO;
+            }
+        }
+        return YES;
+    }
 
     NSString *prefix = [[DKDataIsolation sharedInstance] keychainServicePrefix];
     if (prefix.length == 0) return YES;
 
-    // 如果返回的是纯数据而没有属性，无法判断归属，保持兼容放行。
-    if (stringValues.count == 0) return YES;
+    // 非默认账号下，如果结果没有任何可识别归属的字段，不能放行。
+    // 否则 SecItemCopyMatching 的宽查询会把默认账号 A 的纯数据凭证返回给 B，
+    // 造成“菜单显示 B，但应用仍进入 A 登录态”的问题。
+    if (stringValues.count == 0) return NO;
 
     for (NSString *value in stringValues) {
         if ([value hasPrefix:prefix]) {
