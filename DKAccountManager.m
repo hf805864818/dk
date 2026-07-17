@@ -457,13 +457,21 @@ static NSString *_accountsRootPath = nil;
                 // ============================================================
                 // 在 exit(0) 之前完成状态切换（此时用户已确认，不会回退）
                 // 目录数据搬移在下次启动的 %ctor 中完成（App 未初始化时 rename 可靠）
+                //
+                // 重要：saveCurrentState 必须在 _currentAccountName 修改之前调用。
+                // saveCurrentState 内部调用 snapshotDefaultSessionIfActive，
+                // 它通过 [manager currentAccountName] 判断当前是否为默认账号。
+                // 如果先改 _currentAccountName 再调用 saveCurrentState，
+                // 默认→子账号切换时 snapshotDefaultSessionIfActive 会错误跳过，
+                // 导致默认账号的会话快照丢失，切回默认账号时进入登录页。
                 // ============================================================
 
-                // 切换 _currentAccountName
-                _currentAccountName = name;
-
-                // 保存当前活跃账号标记到磁盘
+                // 保存当前活跃账号标记到磁盘（在旧账号上下文中执行快照）
                 [self saveCurrentState];
+
+                // 切换 _currentAccountName 并写入新账号到文件
+                _currentAccountName = name;
+                [self _saveCurrentAccountToFile:name];
 
                 // 恢复目标账号的网络会话
                 if ([name isEqualToString:kDKDefaultAccountName]) {
