@@ -117,6 +117,10 @@ static CFDictionaryRef hooked_CFPreferencesCopyMultiple(CFArrayRef keysToFetch, 
 // POSIX API 读写文件，绕过所有 ObjC 层 Hook（NSFileManager 等）。
 // 必须通过 fishhook 拦截这些底层调用，将路径重定向到隔离目录。
 // ============================================================
+
+// DKRemapFilePath 在 DKFileManagerHook.m 中定义
+extern NSString* DKRemapFilePath(NSString *path);
+
 static int (*original_open)(const char *path, int flags, ...);
 static int (*original_openat)(int fd, const char *path, int flags, ...);
 static int (*original_stat)(const char *path, struct stat *buf);
