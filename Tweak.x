@@ -114,17 +114,9 @@ static CFDictionaryRef hooked_CFPreferencesCopyMultiple(CFArrayRef keysToFetch, 
 // 避免 TRAE 直接调用 CFPreferences API 时数据落入不同文件，
 // 导致切换账号后登录态丢失。
 static NSString* DKCFPreferencesPlistPath(void) {
-    DKAccountManager *manager = [DKAccountManager sharedManager];
-    NSString *currentAccount = [manager currentAccountName];
-    if ([currentAccount isEqualToString:[manager defaultAccountName]]) {
-        return nil;
-    }
-    // 指定默认账号使用 NSHomeDirectory()，等同于原始默认账号
-    NSString *designatedDefault = [manager designatedDefaultAccountName];
-    if (designatedDefault && [currentAccount isEqualToString:designatedDefault]) {
-        return nil;
-    }
-    return [[DKDataIsolation sharedInstance] userDefaultsFileForSuiteName:nil];
+    // 目录搬移方案：所有账号的数据都在沙盒中，
+    // 不需要重定向到独立的 plist。
+    return nil;
 }
 
 static NSMutableDictionary* DKCFPreferencesLoad(void) {
@@ -173,12 +165,11 @@ static BOOL DKShouldUseOriginalDefaults(void) {
     DKAccountManager *manager = [DKAccountManager sharedManager];
     if (manager.isSwitching) return YES;
 
-    NSString *currentAccount = [manager currentAccountName];
-    if ([currentAccount isEqualToString:[manager defaultAccountName]]) return YES;
-    // 指定默认账号使用 NSHomeDirectory()，等同于原始默认账号
-    NSString *designatedDefault = [manager designatedDefaultAccountName];
-    if (designatedDefault && [currentAccount isEqualToString:designatedDefault]) return YES;
-    return NO;
+    // 目录搬移方案：所有账号的数据都在 NSHomeDirectory()/Library/ 中
+    // （通过 moveAppDataToAccount/moveAccountDataToApp 原子交换）。
+    // 因此 Hook 不需要重定向到独立的 plist，直接走原始路径即可。
+    // 只有指定默认账号需要特殊处理（其数据也在沙盒中）。
+    return YES;
 }
 
 %hook NSUserDefaults

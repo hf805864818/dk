@@ -106,23 +106,9 @@ NSUserDefaults* DKGetAccountUserDefaults(NSString *suiteName) {
 // ============================================================
 
 static NSString* _DKGetAccountPlistPath(void) {
-    // 获取当前账号的 UserDefaults plist 路径
-    DKAccountManager *manager = [DKAccountManager sharedManager];
-    NSString *currentAccount = [manager currentAccountName];
-    if ([currentAccount isEqualToString:[manager defaultAccountName]]) {
-        return nil; // 默认账号不隔离
-    }
-    
-    NSString *plistPath = [[DKDataIsolation sharedInstance] userDefaultsFileForSuiteName:nil];
-    // 确保文件存在
-    if (plistPath && ![[NSFileManager defaultManager] fileExistsAtPath:plistPath]) {
-        [[NSFileManager defaultManager] createDirectoryAtPath:[plistPath stringByDeletingLastPathComponent]
-                                  withIntermediateDirectories:YES
-                                                   attributes:nil
-                                                        error:NULL];
-        [@{} writeToFile:plistPath atomically:YES];
-    }
-    return plistPath;
+    // 目录搬移方案：所有账号的数据都在沙盒 Library/Preferences/ 中，
+    // 不需要重定向到独立的 plist。返回 nil 表示使用原始路径。
+    return nil;
 }
 
 // 直接从账号独立的 plist 读取值（用于 Hook 中，避免递归）
