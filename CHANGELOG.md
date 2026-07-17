@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.0.54] - 2026-07-17
+
+- f5b5670 fix: ensureDataOwnershipForAccount backup logic — don't overwrite valid backups
+
+
 ## [1.0.53] - 2026-07-17
 
 - c43a553 fix: add DKFileManagerHook.m to Makefile source list
