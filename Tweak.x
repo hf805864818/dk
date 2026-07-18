@@ -441,6 +441,85 @@ static BOOL DKShouldUseOriginalCFPreferences(void) {
 %end
 
 // ============================================================
+// Hook 12: UIActivityViewController - 修复文件导出崩溃
+//
+// 问题：TRAE 将文件保存到 Documents/，被 Hook 重定向到隔离目录。
+// 后续通过 UIActivityViewController 分享时，系统分享框架
+// (SHSheetActivityItemsManager/NSItemProvider) 用原始路径加载文件，
+// 这些系统 API 绕过 Hook → 文件不存在 → nil → 崩溃。
+//
+// 修复：在分享前，检测文件 URL 是否已被重定向到隔离目录，
+// 如果是，将文件复制到真实 tmp/ (不重定向的临时目录)，
+// 用真实路径替换 URL，确保系统分享框架能找到文件。
+// ============================================================
+%hook UIActivityViewController
+
+- (instancetype)initWithActivityItems:(NSArray *)activityItems applicationActivities:(NSArray *)applicationActivities {
+    // 获取当前账号的隔离路径前缀
+    DKAccountManager *accountMgr = [DKAccountManager sharedManager];
+    NSString *currentAccount = [accountMgr currentAccountName];
+    NSString *defaultAccount = [accountMgr defaultAccountName];
+    NSString *designatedDefault = [accountMgr designatedDefaultAccountName];
+    
+    BOOL isIsolated = ![currentAccount isEqualToString:defaultAccount] &&
+                      (!designatedDefault || ![currentAccount isEqualToString:designatedDefault]);
+    
+    NSArray *fixedItems = activityItems;
+    if (isIsolated) {
+        NSString *accountDataPath = [accountMgr dataPathForAccount:currentAccount];
+        NSString *homePath = NSHomeDirectory();
+        NSMutableArray *mutableItems = [activityItems mutableCopy];
+        BOOL needsFix = NO;
+        
+        for (NSUInteger i = 0; i < mutableItems.count; i++) {
+            id item = mutableItems[i];
+            NSURL *fileURL = nil;
+            if ([item isKindOfClass:[NSURL class]]) {
+                fileURL = (NSURL *)item;
+            } else if ([item isKindOfClass:[NSString class]]) {
+                fileURL = [NSURL fileURLWithPath:(NSString *)item];
+            }
+            
+            if (!fileURL || ![fileURL isFileURL]) continue;
+            
+            NSString *filePath = [fileURL path];
+            if (![filePath hasPrefix:homePath]) continue;
+            
+            // 计算隔离目录中的对应路径
+            NSString *relativePath = [filePath substringFromIndex:homePath.length];
+            if ([relativePath hasPrefix:@"/Documents/DKAccounts"]) continue;
+            if ([relativePath hasPrefix:@"/tmp/"] || [relativePath isEqualToString:@"/tmp"]) continue;
+            if ([relativePath hasPrefix:@"/Library/Caches/"] || [relativePath isEqualToString:@"/Library/Caches"]) continue;
+            
+            NSString *isolatedPath = [accountDataPath stringByAppendingPathComponent:relativePath];
+            NSFileManager *fm = [NSFileManager defaultManager];
+            
+            if ([fm fileExistsAtPath:isolatedPath] && ![fm fileExistsAtPath:filePath]) {
+                // 文件在隔离目录存在，但原始路径不存在 → 复制到真实 tmp/
+                NSString *tmpPath = [NSTemporaryDirectory() stringByAppendingPathComponent:
+                                     [NSString stringWithFormat:@"dk_share_%@", [filePath lastPathComponent]]];
+                // 移除旧文件
+                [fm removeItemAtPath:tmpPath error:nil];
+                if ([fm copyItemAtPath:isolatedPath toPath:tmpPath error:nil]) {
+                    NSURL *tmpURL = [NSURL fileURLWithPath:tmpPath];
+                    mutableItems[i] = tmpURL;
+                    needsFix = YES;
+                    NSLog(@"[DK] 🔄 导出文件映射: %@ → %@", isolatedPath, tmpPath);
+                }
+            }
+        }
+        
+        if (needsFix) {
+            fixedItems = [mutableItems copy];
+        }
+    }
+    
+    return %orig(fixedItems, applicationActivities);
+}
+
+%end
+
+// ============================================================
 // Hook 9: NSFileHandle - 文件描述符级路径重定向
 //
 // 文件上传失败的根因：TRAE 使用 NSFileHandle 读写文件，
