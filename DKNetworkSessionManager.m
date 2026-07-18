@@ -1,5 +1,6 @@
 #import "DKNetworkSessionManager.h"
 #import "DKAccountManager.h"
+#import "DKUserDefaultsHook.h"
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <Security/Security.h>
@@ -391,6 +392,16 @@ static BOOL DKIsSessionRelatedDefaultsKey(NSString *key) {
             headers[@"__DK_FULL_DOMAIN__"] = fullDomain;
             NSLog(@"[DK] 默认账号完整 UserDefaults 域已捕获 %lu 键", (unsigned long)fullDomain.count);
         }
+    } else {
+        // 子账号：直接从隔离 plist 读取全部数据。
+        // [NSUserDefaults dictionaryRepresentation] 没有被 Hook，
+        // 子账号时它返回的是沙盒（空）的字典，而非隔离 plist 的数据。
+        // 必须用 DKReadAccountUserDefaultsDictionary 直接读取隔离 plist 文件。
+        NSDictionary *isolationDict = DKReadAccountUserDefaultsDictionary();
+        if (isolationDict && isolationDict.count > 0) {
+            headers[@"__DK_ISOLATION_PLIST__"] = isolationDict;
+            NSLog(@"[DK] 子账号隔离 plist 已捕获 %lu 键", (unsigned long)isolationDict.count);
+        }
     }
 
     for (NSString *key in DKAuthHeaderKeys()) {
@@ -400,12 +411,17 @@ static BOOL DKIsSessionRelatedDefaultsKey(NSString *key) {
         }
     }
 
-    NSDictionary *allDefaults = [defaults dictionaryRepresentation];
-    for (NSString *key in allDefaults) {
-        if (DKIsSessionRelatedDefaultsKey(key)) {
-            id value = allDefaults[key];
-            if (value) {
-                headers[key] = value;
+    // 子账号的 dictionaryRepresentation 返回的是沙盒（空），
+    // 所以 session-related keys 扫描对子账号无效。跳过这步，
+    // 子账号的完整数据已通过 __DK_ISOLATION_PLIST__ 捕获。
+    if ([currentAccount isEqualToString:[manager defaultAccountName]]) {
+        NSDictionary *allDefaults = [defaults dictionaryRepresentation];
+        for (NSString *key in allDefaults) {
+            if (DKIsSessionRelatedDefaultsKey(key)) {
+                id value = allDefaults[key];
+                if (value) {
+                    headers[key] = value;
+                }
             }
         }
     }
@@ -433,9 +449,23 @@ static BOOL DKIsSessionRelatedDefaultsKey(NSString *key) {
         }
     }
 
+    // 检查是否有隔离 plist 快照（子账号专用）
+    NSDictionary *isolationDict = headers[@"__DK_ISOLATION_PLIST__"];
+    if (isolationDict) {
+        DKAccountManager *manager = [DKAccountManager sharedManager];
+        NSString *currentAccount = [manager currentAccountName];
+        if (![currentAccount isEqualToString:[manager defaultAccountName]]) {
+            // 子账号：直接写入隔离 plist 文件，恢复全部 NSUserDefaults 数据
+            DKWriteAccountUserDefaultsDictionary(isolationDict);
+            NSLog(@"[DK] 子账号隔离 plist 已恢复 %lu 键", (unsigned long)isolationDict.count);
+            return;
+        }
+    }
+
     [self _clearAuthHeaders];
     for (NSString *key in headers) {
         if ([key isEqualToString:@"__DK_FULL_DOMAIN__"]) continue;
+        if ([key isEqualToString:@"__DK_ISOLATION_PLIST__"]) continue;
         [defaults setObject:headers[key] forKey:key];
     }
     [defaults synchronize];

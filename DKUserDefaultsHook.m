@@ -201,3 +201,17 @@ void DKClearAccountUserDefaults(void) {
         NSLog(@"[DK] 已清空账号 %@ 的 UserDefaults 独立 plist", currentAccount);
     }
 }
+
+// 写入完整的账号独立 UserDefaults 字典（用于会话恢复）
+void DKWriteAccountUserDefaultsDictionary(NSDictionary *dict) {
+    DKAccountManager *manager = [DKAccountManager sharedManager];
+    NSString *currentAccount = [manager currentAccountName];
+    
+    if ([currentAccount isEqualToString:[manager defaultAccountName]]) return;
+    
+    NSString *plistPath = _DKGetAccountPlistPath();
+    if (plistPath && dict) {
+        [dict writeToFile:plistPath atomically:YES];
+        NSLog(@"[DK] 已写入账号 %@ 的完整 UserDefaults 字典 %lu 键", currentAccount, (unsigned long)dict.count);
+    }
+}

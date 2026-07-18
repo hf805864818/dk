@@ -317,6 +317,70 @@ static NSString *const kDKLibraryOwnerFile = @".dk_library_owner";
 
 #pragma mark - 递归删除工具
 
+/// 获取隔离 plist 路径（dk_<bundleID>.plist，与 DKUserDefaultsHook 保持一致）
+- (NSString *)_isolationPlistPath {
+    NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
+    NSString *prefsDir = [[self appHomePath] stringByAppendingPathComponent:@"Library/Preferences"];
+    NSString *filename = [NSString stringWithFormat:@"dk_%@.plist", bundleID];
+    return [prefsDir stringByAppendingPathComponent:filename];
+}
+
+/// 保存隔离 plist 到账号的隔离目录（在清空沙盒前调用）
+- (void)_saveIsolationPlistToAccountDir:(NSString *)accountName {
+    DKAccountManager *manager = [DKAccountManager sharedManager];
+    if ([accountName isEqualToString:[manager defaultAccountName]]) return;
+
+    NSString *plistPath = [self _isolationPlistPath];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    if (![fm fileExistsAtPath:plistPath]) {
+        NSLog(@"[DK] 隔离 plist 不存在，跳过保存");
+        return;
+    }
+
+    NSString *accountDir = [manager dataPathForAccount:accountName];
+    NSString *dstPath = [accountDir stringByAppendingPathComponent:@"Library/Preferences/dk_isolation.plist"];
+    [fm createDirectoryAtPath:[dstPath stringByDeletingLastPathComponent]
+  withIntermediateDirectories:YES
+                   attributes:@{NSFileProtectionKey: NSFileProtectionNone}
+                        error:nil];
+    [fm removeItemAtPath:dstPath error:nil];
+    if ([fm copyItemAtPath:plistPath toPath:dstPath error:nil]) {
+        NSLog(@"[DK] 隔离 plist 已保存到账号「%@」的隔离目录", accountName);
+    } else {
+        NSLog(@"[DK] ⚠️ 隔离 plist 保存失败");
+    }
+}
+
+/// 从账号的隔离目录恢复隔离 plist（在清空沙盒后调用）
+- (void)_restoreIsolationPlistFromAccountDir:(NSString *)accountName {
+    DKAccountManager *manager = [DKAccountManager sharedManager];
+    if ([accountName isEqualToString:[manager defaultAccountName]]) return;
+
+    NSString *plistPath = [self _isolationPlistPath];
+    NSString *accountDir = [manager dataPathForAccount:accountName];
+    NSString *srcPath = [accountDir stringByAppendingPathComponent:@"Library/Preferences/dk_isolation.plist"];
+
+    NSFileManager *fm = [NSFileManager defaultManager];
+    [fm createDirectoryAtPath:[plistPath stringByDeletingLastPathComponent]
+  withIntermediateDirectories:YES
+                   attributes:@{NSFileProtectionKey: NSFileProtectionNone}
+                        error:nil];
+
+    if ([fm fileExistsAtPath:srcPath]) {
+        [fm removeItemAtPath:plistPath error:nil];
+        if ([fm copyItemAtPath:srcPath toPath:plistPath error:nil]) {
+            NSLog(@"[DK] 隔离 plist 已从账号「%@」的隔离目录恢复", accountName);
+        } else {
+            NSLog(@"[DK] ⚠️ 隔离 plist 恢复失败，创建空文件");
+            [@{} writeToFile:plistPath atomically:YES];
+        }
+    } else {
+        // 无保存的隔离 plist（新账号），创建空文件
+        [@{} writeToFile:plistPath atomically:YES];
+        NSLog(@"[DK] 账号「%@」无隔离 plist 备份，创建空文件", accountName);
+    }
+}
+
 /// 递归删除目录内容（不删除目录本身）。
 /// 先删除文件，再递归进入子目录。单文件/空目录的 removeItemAtPath 在 %ctor 阶段必定成功。
 /// 这与 rename() 不同：rename() 在 iOS 上可能因沙箱限制失败，
@@ -556,7 +620,8 @@ static NSString *const kDKLibraryOwnerFile = @".dk_library_owner";
         }
         NSLog(@"[DK] ✅ Documents/（排除 DKAccounts）已备份到 .default_backup/");
     } else {
-        // 旧所有者是子账号：沙盒为空（Hook 已重定向写入），直接清空
+        // 旧所有者是子账号：先保存隔离 plist，再清空沙盒
+        [self _saveIsolationPlistToAccountDir:oldOwner];
         NSLog(@"[DK] 旧所有者「%@」是子账号，沙盒为空，跳过备份直接清空", oldOwner);
         [self _recursiveDeleteContentsOfDirectory:sandboxLib];
         if (![fm fileExistsAtPath:sandboxLib]) {
@@ -624,7 +689,7 @@ static NSString *const kDKLibraryOwnerFile = @".dk_library_owner";
         NSLog(@"[DK] 默认账号会话已重新应用");
 
     } else {
-        // 当前账号是子账号：清空沙盒即可，Hook 会重定向到隔离目录
+        // 当前账号是子账号：清空沙盒，然后恢复隔离 plist
         NSLog(@"[DK] 当前账号「%@」是子账号，清空沙盒（Hook 将重定向到隔离目录）", currentAccount);
         if (![fm fileExistsAtPath:sandboxLib]) {
             [fm createDirectoryAtPath:sandboxLib
@@ -641,6 +706,8 @@ static NSString *const kDKLibraryOwnerFile = @".dk_library_owner";
                                     error:nil];
             }
         }
+        // 恢复隔离 plist（子账号的 NSUserDefaults 数据）
+        [self _restoreIsolationPlistFromAccountDir:currentAccount];
         // 清空 Documents/（排除 DKAccounts/），避免 MMKV 读到默认账号残留数据
         [self _recursiveDeleteContentsExceptDKAccounts:sandboxDocs];
         if (![fm fileExistsAtPath:sandboxDocs]) {
