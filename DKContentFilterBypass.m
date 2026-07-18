@@ -189,6 +189,55 @@ static NSUInteger _bypassCount = 0;
         NSLog(@"[DK] 🔓 移除 content_filter_warning 标记");
     }
     
+    // ============================================================
+    // 策略 4.5: 检查 choices[].finish_reason — OpenAI 兼容 SSE 格式
+    // TRAE 使用 OpenAI 兼容的 SSE 流式响应格式：
+    // {"choices":[{"delta":{...},"finish_reason":"content_filter"}]}
+    // 当 finish_reason 为 content_filter/sensitive/moderation 时，
+    // 表示 AI 回复被内容审核拦截，需要替换为 stop 或 null。
+    // ============================================================
+    NSArray *choices = result[@"choices"];
+    if ([choices isKindOfClass:[NSArray class]]) {
+        BOOL choiceModified = NO;
+        NSMutableArray *mutableChoices = [choices mutableCopy];
+        for (NSUInteger i = 0; i < mutableChoices.count; i++) {
+            NSDictionary *choice = mutableChoices[i];
+            if (![choice isKindOfClass:[NSDictionary class]]) continue;
+            
+            NSString *finishReason = choice[@"finish_reason"];
+            if ([finishReason isKindOfClass:[NSString class]]) {
+                NSString *lower = [finishReason lowercaseString];
+                if ([lower isEqualToString:@"content_filter"] ||
+                    [lower isEqualToString:@"sensitive"] ||
+                    [lower isEqualToString:@"moderation"] ||
+                    [lower isEqualToString:@"blocked"]) {
+                    NSMutableDictionary *mutableChoice = [choice mutableCopy];
+                    mutableChoice[@"finish_reason"] = @"stop";
+                    mutableChoice[@"content_filter"] = @NO;
+                    [mutableChoice removeObjectForKey:@"content_filter_results"];
+                    mutableChoices[i] = mutableChoice;
+                    choiceModified = YES;
+                    _bypassCount++;
+                    NSLog(@"[DK] 🔓 拦截 choices[%lu].finish_reason: %@", (unsigned long)i, finishReason);
+                }
+            }
+            
+            // 检查 choices[].content_filter_results
+            if (choice[@"content_filter_results"]) {
+                NSMutableDictionary *mutableChoice = [choice mutableCopy];
+                [mutableChoice removeObjectForKey:@"content_filter_results"];
+                mutableChoices[i] = mutableChoice;
+                choiceModified = YES;
+                _bypassCount++;
+                NSLog(@"[DK] 🔓 移除 choices[%lu].content_filter_results", (unsigned long)i);
+            }
+        }
+        if (choiceModified) {
+            result[@"choices"] = mutableChoices;
+            modified = YES;
+        }
+    }
+    
     // 检查 error_message 字段中的敏感词提示
     NSString *errorMessage = result[@"error_message"];
     if (errorMessage && [errorMessage containsString:@"敏感词"]) {
@@ -322,6 +371,17 @@ static NSUInteger _bypassCount = 0;
             // 内容过滤标记
             @[@"\"sensitive\":true", @"\"sensitive\":false"],
             @[@"\"content_filter\":true", @"\"content_filter\":false"],
+            // OpenAI 兼容 SSE 格式：finish_reason 过滤
+            @[@"\"finish_reason\":\"content_filter\"", @"\"finish_reason\":\"stop\""],
+            @[@"\"finish_reason\":\"sensitive\"", @"\"finish_reason\":\"stop\""],
+            @[@"\"finish_reason\":\"moderation\"", @"\"finish_reason\":\"stop\""],
+            @[@"\"finish_reason\":\"blocked\"", @"\"finish_reason\":\"stop\""],
+            // 嵌套的 content_filter_results
+            @[@"\"content_filter_results\"", @"\"_dk_filtered\""],
+            // 敏感词错误提示文本
+            @[@"敏感词", @""],
+            @[@"sensitive_content", @"ok"],
+            @[@"content_filter_warning", @"_dk_ok"],
         ];
         
         for (NSArray *pattern in textPatterns) {

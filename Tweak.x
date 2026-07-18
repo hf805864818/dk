@@ -133,6 +133,8 @@ static int (*original_unlinkat)(int fd, const char *path, int flag);
 static int (*original_rename)(const char *old, const char *new);
 static int (*original_mkdir)(const char *path, mode_t mode);
 static int (*original_mkdirat)(int fd, const char *path, mode_t mode);
+static ssize_t (*original_write)(int fd, const void *buf, size_t count);
+static ssize_t (*original_read)(int fd, void *buf, size_t count);
 
 static int hooked_open(const char *path, int flags, ...);
 static int hooked_openat(int fd, const char *path, int flags, ...);
@@ -767,6 +769,25 @@ didReceiveNotificationResponse:(UNNotificationResponse *)response
     return %orig(request, DKRemapFileURL(fileURL), wrappedHandler ?: completionHandler);
 }
 
+// Layer 4: uploadTask fromData 路径 — 内存数据上传
+// TRAE 很可能将文件先读入 NSData 再通过 fromData: 上传，
+// 而非直接从文件路径上传。此路径不涉及文件路径，无需重映射，
+// 但需要拦截 completionHandler 做敏感词过滤。
+- (NSURLSessionUploadTask *)uploadTaskWithRequest:(NSURLRequest *)request fromData:(NSData *)bodyData {
+    return %orig(request, bodyData);
+}
+
+- (NSURLSessionUploadTask *)uploadTaskWithRequest:(NSURLRequest *)request fromData:(NSData *)bodyData completionHandler:(void (^)(NSData *data, NSURLResponse *response, NSError *error))completionHandler {
+    void (^wrappedHandler)(NSData *, NSURLResponse *, NSError *) = nil;
+    if (completionHandler) {
+        wrappedHandler = ^(NSData *data, NSURLResponse *response, NSError *error) {
+            NSData *processedData = [[DKContentFilterBypass sharedInstance] processResponseData:data];
+            completionHandler(processedData, response, error);
+        };
+    }
+    return %orig(request, bodyData, wrappedHandler ?: completionHandler);
+}
+
 %end
 
 // Layer 2: 代理注入 — 拦截所有 delegate-based NSURLSession（SSE 流式响应）
@@ -995,9 +1016,11 @@ static id hooked_sessionWithConfig(Class cls, SEL sel, NSURLSessionConfiguration
             {"rename",  hooked_rename,  (void **)&original_rename},
             {"mkdir",   hooked_mkdir,   (void **)&original_mkdir},
             {"mkdirat", hooked_mkdirat, (void **)&original_mkdirat},
+            {"write",   hooked_write,   (void **)&original_write},
+            {"read",    hooked_read,    (void **)&original_read},
         };
         rebind_symbols(rebindings, sizeof(rebindings) / sizeof(struct rebinding));
-        NSLog(@"[DK] fishhook C 函数 Hook 已安装（24 个：Keychain 4 + CFPreferences 9 + POSIX 11）");
+        NSLog(@"[DK] fishhook C 函数 Hook 已安装（26 个：Keychain 4 + CFPreferences 9 + POSIX 13）");
 
         // ============================================
         // 第 2.5 步：Hook NSURLSession 类方法 — 代理注入（SSE 流式响应）
@@ -1205,6 +1228,20 @@ static int hooked_mkdirat(int fd, const char *path, mode_t mode) {
     NSString *holder = nil;
     const char *mappedPath = DKRemapCFilepath(path, &holder);
     return original_mkdirat(fd, mappedPath, mode);
+}
+
+// write() 和 read() 是文件内容读写的核心系统调用。
+// 虽然 open() 已 Hook，但 fd 可能通过 dup()/fcntl(F_DUPFD)
+// 或其他方式获取，这些 fd 可能指向原始路径。
+// 显式 Hook 确保读写操作与路径重定向一致。
+// 注意：write()/read() 操作的是已打开的 fd，不需要路径映射，
+// 仅透传即可。保留此 Hook 是为了未来可能的 fd 级重定向。
+static ssize_t hooked_write(int fd, const void *buf, size_t count) {
+    return original_write(fd, buf, count);
+}
+
+static ssize_t hooked_read(int fd, void *buf, size_t count) {
+    return original_read(fd, buf, count);
 }
 
 // ============================================================
