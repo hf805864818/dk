@@ -30,6 +30,7 @@
 #import "DKNetworkSessionManager.h"
 #import "DKPushNotificationBridge.h"
 #import "DKContentFilterBypass.h"
+#import "DKFilterURLProtocol.h"
 
 // ============================================================
 // 版本号编译宏（由 Makefile 注入）
@@ -1167,6 +1168,7 @@ static id hooked_sessionWithConfig(Class cls, SEL sel, NSURLSessionConfiguration
                 [[DKNetworkSessionManager sharedManager] setup];
                 [[DKPushNotificationBridge sharedInstance] setup];
                 [[DKContentFilterBypass sharedInstance] setup];
+                [DKFilterURLProtocol registerProtocol];
                 [[DKAccountUI sharedInstance] setup];
 
                 // 启动会话定期刷新
