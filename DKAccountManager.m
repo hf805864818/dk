@@ -183,9 +183,9 @@ static NSString *_accountsRootPath = nil;
         NSString *fullPath = [rootPath stringByAppendingPathComponent:item];
         BOOL isDir = NO;
         if ([fm fileExistsAtPath:fullPath isDirectory:&isDir] && isDir) {
-            // 跳过 .default_backup 和 . 开头的系统目录
-            if ([item hasPrefix:@"."] && ![item isEqualToString:@".default_backup"]) {
-                NSLog(@"[DK] refreshAccountList: 跳过隐藏目录 %@", item);
+            // 跳过内部目录：. 开头（如 .default_backup）和 _ 开头（如 _default_keychain_）
+            if ([item hasPrefix:@"."] || [item hasPrefix:@"_"]) {
+                NSLog(@"[DK] refreshAccountList: 跳过内部目录 %@", item);
                 continue;
             }
 
