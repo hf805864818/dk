@@ -586,13 +586,6 @@ static char kDKHiddenIndicatorKey;
                 label.textColor = [UIColor colorWithRed:0.3 green:0.9 blue:0.5 alpha:1.0];
             }
 
-            // 标记指定默认账号
-            if (designatedDefault && [item isEqualToString:designatedDefault] &&
-                !isAddAccount && !isHideOption && !isFilterToggle && !isClearData && !isVersionInfo) {
-                label.text = [NSString stringWithFormat:@"⭐ %@", item];
-                label.textColor = [UIColor colorWithRed:1.0 green:0.85 blue:0.3 alpha:1.0];
-            }
-            
             [rowView addSubview:label];
             
             if (!isAddAccount && !isHideOption && !isFilterToggle && !isClearData && !isVersionInfo) {
@@ -608,18 +601,6 @@ static char kDKHiddenIndicatorKey;
                     badge.clipsToBounds = YES;
                     [rowView addSubview:badge];
                 }
-                
-                // 非默认账号：添加 ⭐ 设为默认按钮
-                if (!isDefaultAccount && !isAddAccount) {
-                    UIButton *starBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-                    starBtn.frame = CGRectMake(kMenuWidth - 52, 8, 32, 32);
-                    [starBtn setTitle:@"⭐" forState:UIControlStateNormal];
-                    starBtn.titleLabel.font = [UIFont systemFontOfSize:16];
-                    starBtn.tag = i;
-                    [starBtn addTarget:self action:@selector(_handleStarButtonTap:) forControlEvents:UIControlEventTouchUpInside];
-                    [rowView addSubview:starBtn];
-                }
-            }
             
             rowView.tag = i;
             UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc]
@@ -740,13 +721,19 @@ static char kDKHiddenIndicatorKey;
                                                                        message:nil
                                                                 preferredStyle:UIAlertControllerStyleActionSheet];
         
-        [alert addAction:[UIAlertAction actionWithTitle:@"重命名"
+        [alert addAction:[UIAlertAction actionWithTitle:@"自定义重命名"
                                                   style:UIAlertActionStyleDefault
                                                 handler:^(UIAlertAction *action) {
             [self _promptRenameAccount:accountName];
         }]];
         
-        [alert addAction:[UIAlertAction actionWithTitle:@"删除账号"
+        [alert addAction:[UIAlertAction actionWithTitle:@"设为默认账号"
+                                                  style:UIAlertActionStyleDefault
+                                                handler:^(UIAlertAction *action) {
+            [[DKAccountManager sharedManager] promptSetDesignatedDefaultForAccount:accountName];
+        }]];
+        
+        [alert addAction:[UIAlertAction actionWithTitle:@"删除当前账号"
                                                   style:UIAlertActionStyleDestructive
                                                 handler:^(UIAlertAction *action) {
             [self _promptDeleteAccount:accountName];
@@ -759,18 +746,6 @@ static char kDKHiddenIndicatorKey;
             [rootVC presentViewController:alert animated:YES completion:nil];
         }
     });
-}
-
-- (void)_handleStarButtonTap:(UIButton *)sender {
-    NSInteger index = sender.tag;
-    [self hideAccountMenu];
-    
-    NSArray *accounts = [[DKAccountManager sharedManager] allAccountNames];
-    NSInteger accountIndex = index - 2;
-    if (accountIndex >= 0 && accountIndex < accounts.count) {
-        NSString *accountName = accounts[accountIndex];
-        [[DKAccountManager sharedManager] promptSetDesignatedDefaultForAccount:accountName];
-    }
 }
 
 #pragma mark - 敏感词过滤开关
