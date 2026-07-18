@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.0.62] - 2026-07-18
+
+- db2e7b3 新增长按重命名账号功能
+
+
 ## [1.0.61] - 2026-07-18
 
 - cda2e92 修复：账号列表错误显示 .default_backup 和 _default_keychain_
