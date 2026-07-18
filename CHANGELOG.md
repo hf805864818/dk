@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.0.69] - 2026-07-18
+
+- d1d760e 修复编译错误：添加 hooked_write/read 前向声明 / 修复 sizeof VLA
+- e19e473 修复：文件上传失败 + 增强敏感词过滤
+
+
 ## [1.0.68] - 2026-07-18
 
 - 24ada75 修复：多开账号文件/照片上传失败（NSFileHandle+NSData+NSURLSession 三重 Hook）
