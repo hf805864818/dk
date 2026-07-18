@@ -147,6 +147,8 @@ static int hooked_unlinkat(int fd, const char *path, int flag);
 static int hooked_rename(const char *old, const char *new);
 static int hooked_mkdir(const char *path, mode_t mode);
 static int hooked_mkdirat(int fd, const char *path, mode_t mode);
+static ssize_t hooked_write(int fd, const void *buf, size_t count);
+static ssize_t hooked_read(int fd, void *buf, size_t count);
 
 // CFPreferences 隔离用 plist 路径
 // 与 NSUserDefaults Hook 共享同一个账号隔离 plist，
@@ -1019,7 +1021,8 @@ static id hooked_sessionWithConfig(Class cls, SEL sel, NSURLSessionConfiguration
             {"write",   hooked_write,   (void **)&original_write},
             {"read",    hooked_read,    (void **)&original_read},
         };
-        rebind_symbols(rebindings, sizeof(rebindings) / sizeof(struct rebinding));
+        // 26 个 Hook：Keychain 4 + CFPreferences 9 + POSIX 13
+        rebind_symbols(rebindings, 26);
         NSLog(@"[DK] fishhook C 函数 Hook 已安装（26 个：Keychain 4 + CFPreferences 9 + POSIX 13）");
 
         // ============================================
