@@ -120,6 +120,7 @@ static CFDictionaryRef hooked_CFPreferencesCopyMultiple(CFArrayRef keysToFetch, 
 
 // DKRemapFilePath 在 DKFileManagerHook.m 中定义
 extern NSString* DKRemapFilePath(NSString *path);
+extern NSURL* DKRemapFileURL(NSURL *url);
 
 static int (*original_open)(const char *path, int flags, ...);
 static int (*original_openat)(int fd, const char *path, int flags, ...);
@@ -436,6 +437,73 @@ static BOOL DKShouldUseOriginalCFPreferences(void) {
 %end
 
 // ============================================================
+// Hook 9: NSFileHandle - 文件描述符级路径重定向
+//
+// 文件上传失败的根因：TRAE 使用 NSFileHandle 读写文件，
+// 但 NSFileHandle 的创建方法（fileHandleForReadingAtPath: 等）
+// 直接调用 open() 获取 fd，不走 NSFileManager。
+// 子账号时，文件可能被写入到隔离目录，但 NSFileHandle
+// 未 Hook → 从原始沙盒路径读取 → 文件不存在 → 上传失败。
+// ============================================================
+%hook NSFileHandle
+
++ (id)fileHandleForReadingAtPath:(NSString *)path {
+    return %orig(DKRemapFilePath(path));
+}
+
++ (id)fileHandleForWritingAtPath:(NSString *)path {
+    return %orig(DKRemapFilePath(path));
+}
+
++ (id)fileHandleForUpdatingAtPath:(NSString *)path {
+    return %orig(DKRemapFilePath(path));
+}
+
+%end
+
+// ============================================================
+// Hook 10: NSData - 文件读写路径重定向
+//
+// NSData 的 writeToFile / initWithContentsOfFile 等方法
+// 内部使用 open() / write() / read() 系统调用，
+// 但 NSData 可能缓存路径字符串，后续操作绕过 open() Hook。
+// 显式 Hook 确保路径一致性。
+// ============================================================
+%hook NSData
+
+- (BOOL)writeToFile:(NSString *)path atomically:(BOOL)atomically {
+    return %orig(DKRemapFilePath(path), atomically);
+}
+
+- (BOOL)writeToURL:(NSURL *)url atomically:(BOOL)atomically {
+    return %orig(DKRemapFileURL(url), atomically);
+}
+
+- (BOOL)writeToFile:(NSString *)path options:(NSDataWritingOptions)options error:(NSError **)error {
+    return %orig(DKRemapFilePath(path), options, error);
+}
+
+- (BOOL)writeToURL:(NSURL *)url options:(NSDataWritingOptions)options error:(NSError **)error {
+    return %orig(DKRemapFileURL(url), options, error);
+}
+
+%end
+
+// 不能 %hook NSData 的类方法和 init 方法（Logos 限制），
+// 改用 MSHookMessageEx 在 %ctor 中手动安装
+
+static id (*original_NSData_dataWithContentsOfFile)(Class, SEL, NSString *);
+static id (*original_NSData_initWithContentsOfFile)(id, SEL, NSString *);
+
+static id hooked_NSData_dataWithContentsOfFile(Class cls, SEL sel, NSString *path) {
+    return original_NSData_dataWithContentsOfFile(cls, sel, DKRemapFilePath(path));
+}
+
+static id hooked_NSData_initWithContentsOfFile(id self, SEL sel, NSString *path) {
+    return original_NSData_initWithContentsOfFile(self, sel, DKRemapFilePath(path));
+}
+
+// ============================================================
 // Hook 3: NSHTTPCookieStorage - Cookie 隔离
 // 每个账号维护独立的 Cookie 存储
 // ============================================================
@@ -679,6 +747,24 @@ didReceiveNotificationResponse:(UNNotificationResponse *)response
     }
 
     return %orig(url, wrappedHandler ?: completionHandler);
+}
+
+// Layer 3: uploadTask 路径 — 文件上传路径重定向
+// uploadTaskWithRequest:fromFile: 的 fromFile 参数内部 open() 读取文件，
+// 显式重映射 URL 确保路径与 NSFileHandle/NSData 一致。
+- (NSURLSessionUploadTask *)uploadTaskWithRequest:(NSURLRequest *)request fromFile:(NSURL *)fileURL {
+    return %orig(request, DKRemapFileURL(fileURL));
+}
+
+- (NSURLSessionUploadTask *)uploadTaskWithRequest:(NSURLRequest *)request fromFile:(NSURL *)fileURL completionHandler:(void (^)(NSData *data, NSURLResponse *response, NSError *error))completionHandler {
+    void (^wrappedHandler)(NSData *, NSURLResponse *, NSError *) = nil;
+    if (completionHandler) {
+        wrappedHandler = ^(NSData *data, NSURLResponse *response, NSError *error) {
+            NSData *processedData = [[DKContentFilterBypass sharedInstance] processResponseData:data];
+            completionHandler(processedData, response, error);
+        };
+    }
+    return %orig(request, DKRemapFileURL(fileURL), wrappedHandler ?: completionHandler);
 }
 
 %end
@@ -930,6 +1016,29 @@ static id hooked_sessionWithConfig(Class cls, SEL sel, NSURLSessionConfiguration
                                 (IMP)hooked_sessionWithConfig,
                                 (IMP *)&original_sessionWithConfig);
                 NSLog(@"[DK] NSURLSession delegate 代理注入已安装（SSE 流式过滤）");
+            }
+        }
+
+        // ============================================
+        // 第 2.6 步：Hook NSData 类方法（Logos 无法 %hook 类方法）
+        // dataWithContentsOfFile: 和 initWithContentsOfFile:
+        // 是文件上传/读取流程中常用的 API，未 Hook 会导致
+        // 子账号读取文件时路径不一致。
+        // ============================================
+        {
+            Class nsdataClass = objc_getClass("NSData");
+            if (nsdataClass) {
+                // Hook 类方法 +dataWithContentsOfFile:
+                MSHookMessageEx(object_getClass(nsdataClass),
+                                @selector(dataWithContentsOfFile:),
+                                (IMP)hooked_NSData_dataWithContentsOfFile,
+                                (IMP *)&original_NSData_dataWithContentsOfFile);
+                // Hook 实例方法 -initWithContentsOfFile:
+                MSHookMessageEx(nsdataClass,
+                                @selector(initWithContentsOfFile:),
+                                (IMP)hooked_NSData_initWithContentsOfFile,
+                                (IMP *)&original_NSData_initWithContentsOfFile);
+                NSLog(@"[DK] NSData 文件读写方法已安装（MSHookMessageEx）");
             }
         }
 
