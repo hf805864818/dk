@@ -343,6 +343,90 @@ static NSString *const kDKLibraryOwnerFile = @".dk_library_owner";
     }
 }
 
+/// 将 Documents/ 中除 DKAccounts/ 外的所有内容搬移到目标目录。
+/// 用于备份默认账号的 MMKV（bullet/mmkv.default/SLIMKit 等）数据。
+/// DKAccounts/ 是账户备份目录自身，搬移会形成递归，必须跳过。
+- (void)_moveDocumentsExceptDKAccounts:(NSString *)srcDocs toDirectory:(NSString *)dstDocs {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSError *error = nil;
+
+    if (![fm fileExistsAtPath:srcDocs]) {
+        [fm createDirectoryAtPath:dstDocs
+      withIntermediateDirectories:YES
+                       attributes:@{NSFileProtectionKey: NSFileProtectionNone}
+                            error:nil];
+        return;
+    }
+
+    [fm createDirectoryAtPath:dstDocs
+  withIntermediateDirectories:YES
+                   attributes:@{NSFileProtectionKey: NSFileProtectionNone}
+                        error:nil];
+
+    NSArray *contents = [fm contentsOfDirectoryAtPath:srcDocs error:&error];
+    if (error) {
+        NSLog(@"[DK] 列出 Documents/ 内容失败: %@", error);
+        return;
+    }
+
+    for (NSString *item in contents) {
+        if ([item isEqualToString:@"DKAccounts"]) {
+            NSLog(@"[DK]   ⏭ 跳过 DKAccounts/（自身）");
+            continue;
+        }
+
+        NSString *srcItem = [srcDocs stringByAppendingPathComponent:item];
+        NSString *dstItem = [dstDocs stringByAppendingPathComponent:item];
+
+        if ([fm fileExistsAtPath:dstItem]) {
+            NSString *tmpItem = [dstItem stringByAppendingString:@".tmp"];
+            [fm removeItemAtPath:tmpItem error:nil];
+            rename([dstItem fileSystemRepresentation], [tmpItem fileSystemRepresentation]);
+            dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0), ^{
+                [[NSFileManager defaultManager] removeItemAtPath:tmpItem error:nil];
+            });
+        }
+
+        if (rename([srcItem fileSystemRepresentation], [dstItem fileSystemRepresentation]) == 0) {
+            NSLog(@"[DK]   ✅ %@ (rename)", item);
+            continue;
+        }
+        if ([fm moveItemAtPath:srcItem toPath:dstItem error:&error]) {
+            NSLog(@"[DK]   ✅ %@ (move)", item);
+            continue;
+        }
+        if ([fm copyItemAtPath:srcItem toPath:dstItem error:&error]) {
+            [fm removeItemAtPath:srcItem error:nil];
+            NSLog(@"[DK]   ✅ %@ (copy+delete)", item);
+            continue;
+        }
+        NSLog(@"[DK]   ⚠️ %@ 搬移失败（跳过）: %@", item, error);
+    }
+}
+
+/// 递归删除 Documents/ 内容（跳过 DKAccounts/）。
+/// 用于子账号启动时清空沙盒 Documents/ 中的默认账号 MMKV 残留数据。
+- (void)_recursiveDeleteContentsExceptDKAccounts:(NSString *)docsPath {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSArray *contents = [fm contentsOfDirectoryAtPath:docsPath error:nil];
+    if (!contents) return;
+
+    for (NSString *item in contents) {
+        if ([item isEqualToString:@"DKAccounts"]) continue;
+
+        NSString *itemPath = [docsPath stringByAppendingPathComponent:item];
+        BOOL isDir = NO;
+        [fm fileExistsAtPath:itemPath isDirectory:&isDir];
+
+        if (isDir) {
+            [self _recursiveDeleteContentsOfDirectory:itemPath];
+            [fm removeItemAtPath:itemPath error:nil];
+        } else {
+            [fm removeItemAtPath:itemPath error:nil];
+        }
+    }
+}
+
 #pragma mark - 数据所有权标记
 
 - (void)_writeLibraryOwner:(NSString *)accountName {
@@ -392,44 +476,47 @@ static NSString *const kDKLibraryOwnerFile = @".dk_library_owner";
     // 此时 App 尚未初始化，MMKV/WCDB 等库未打开任何文件。
     //
     // 核心设计：
-    //   - 默认账号的数据直接存储在沙盒 Library/ 中（Hook 不重定向），
-    //     切换时需备份到 .default_backup/ 再恢复。
+    //   - 默认账号的数据直接存储在沙盒 Library/ + Documents/ 中
+    //     （Hook 不重定向），切换时需备份到 .default_backup/ 再恢复。
     //   - 子账号的数据由 Hook 实时重定向到隔离目录
-    //     （如 B账号/Library/、B账号/Documents/），沙盒 Library/
-    //     在子账号活跃期间始终为空。切换时无需备份沙盒（空目录），
+    //     （如 B账号/Library/、B账号/Documents/），沙盒在子账号
+    //     活跃期间始终为空。切换时无需备份沙盒（空目录），
     //     也无需从备份恢复（Hook 自动重定向到隔离目录）。
     //
+    // 重要：Documents/ 包含 MMKV（bullet、mmkv.default 等），
+    // TRAE 将登录 session 存储在 MMKV 中。如果只备份 Library/
+    // 而不备份 Documents/，默认账号的 MMKV 数据会在切换时丢失，
+    // 导致切回默认账号后进入登录页。
+    //
     // 策略：
-    //   1. 旧所有者是默认账号 → 备份沙盒 Library/ 到 .default_backup/
+    //   1. 旧所有者是默认账号 → 备份沙盒 Library/ + Documents/ 到 .default_backup/
     //   2. 旧所有者是子账号 → 沙盒为空，跳过备份，直接清空
     //   3. 当前账号是默认 → 从 .default_backup/ 恢复到沙盒
     //   4. 当前账号是子账号 → 清空沙盒即可，Hook 会重定向到隔离目录
     // ============================================================
     NSString *sandboxLib = [[self appHomePath] stringByAppendingPathComponent:@"Library"];
+    NSString *sandboxDocs = [[self appHomePath] stringByAppendingPathComponent:@"Documents"];
     NSString *oldOwner = owner ?: defaultAccount;
     NSFileManager *fm = [NSFileManager defaultManager];
     BOOL oldOwnerIsDefault = [oldOwner isEqualToString:defaultAccount];
     BOOL currentIsDefault = [currentAccount isEqualToString:defaultAccount];
 
-    const char *srcPath = [sandboxLib fileSystemRepresentation];
+    NSString *oldBackup = [self backupRootPathForAccount:oldOwner];
+    NSString *targetBackup = [self backupRootPathForAccount:currentAccount];
 
     // ============================================================
-    // Step 1: 备份当前沙盒 Library/（仅当旧所有者是默认账号时）
-    //
-    // 子账号的数据由 Hook 实时写入隔离目录，沙盒 Library/ 为空。
-    // 备份空沙盒会覆盖 .default_backup/ 中的有效数据，导致
-    // 后续切回默认账号时数据丢失。
+    // Step 1: 备份当前沙盒（仅当旧所有者是默认账号时）
     // ============================================================
     if (oldOwnerIsDefault) {
-        NSString *oldBackup = [self backupRootPathForAccount:oldOwner];
         NSString *oldBackupLib = [oldBackup stringByAppendingPathComponent:@"Library"];
+        NSString *oldBackupDocs = [oldBackup stringByAppendingPathComponent:@"Documents"];
 
         [fm createDirectoryAtPath:oldBackup
       withIntermediateDirectories:YES
                        attributes:@{NSFileProtectionKey: NSFileProtectionNone}
                             error:nil];
 
-        // 如果旧备份已存在，挪开
+        // --- 备份 Library/ ---
         if ([fm fileExistsAtPath:oldBackupLib]) {
             NSString *tmpLib = [oldBackupLib stringByAppendingString:@".tmp"];
             [fm removeItemAtPath:tmpLib error:nil];
@@ -438,26 +525,50 @@ static NSString *const kDKLibraryOwnerFile = @".dk_library_owner";
                 [[NSFileManager defaultManager] removeItemAtPath:tmpLib error:nil];
             });
         }
-
-        const char *dstPath = [oldBackupLib fileSystemRepresentation];
-        BOOL renameSucceeded = (rename(srcPath, dstPath) == 0);
-
-        if (renameSucceeded) {
-            NSLog(@"[DK] ✅ rename Library/ → .default_backup/（默认账号备份）");
+        const char *srcLibPath = [sandboxLib fileSystemRepresentation];
+        const char *dstLibPath = [oldBackupLib fileSystemRepresentation];
+        BOOL libRenameOK = (rename(srcLibPath, dstLibPath) == 0);
+        if (libRenameOK) {
+            NSLog(@"[DK] ✅ rename Library/ → .default_backup/");
         } else {
-            NSLog(@"[DK] ⚠️ rename Library/ 失败 (errno=%d), 改用递归删除策略", errno);
+            NSLog(@"[DK] ⚠️ rename Library/ 失败 (errno=%d), 改用递归删除", errno);
             [self _moveSubdirectories:sandboxLib toDirectory:oldBackupLib];
             [self _recursiveDeleteContentsOfDirectory:sandboxLib];
-            NSLog(@"[DK] 递归删除 Library/ 内容完成");
         }
+
+        // --- 备份 Documents/（排除 DKAccounts/）---
+        if ([fm fileExistsAtPath:oldBackupDocs]) {
+            NSString *tmpDocs = [oldBackupDocs stringByAppendingString:@".tmp"];
+            [fm removeItemAtPath:tmpDocs error:nil];
+            rename([oldBackupDocs fileSystemRepresentation], [tmpDocs fileSystemRepresentation]);
+            dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0), ^{
+                [[NSFileManager defaultManager] removeItemAtPath:tmpDocs error:nil];
+            });
+        }
+        [self _moveDocumentsExceptDKAccounts:sandboxDocs toDirectory:oldBackupDocs];
+        [self _recursiveDeleteContentsOfDirectory:sandboxDocs];
+        // 确保 Documents/ 目录存在
+        if (![fm fileExistsAtPath:sandboxDocs]) {
+            [fm createDirectoryAtPath:sandboxDocs
+          withIntermediateDirectories:YES
+                           attributes:@{NSFileProtectionKey: NSFileProtectionNone}
+                                error:nil];
+        }
+        NSLog(@"[DK] ✅ Documents/（排除 DKAccounts）已备份到 .default_backup/");
     } else {
-        // 旧所有者是子账号：沙盒 Library/ 为空（Hook 已重定向写入），
-        // 直接清空即可，无需备份。子账号的隔离目录数据完好无损。
+        // 旧所有者是子账号：沙盒为空（Hook 已重定向写入），直接清空
         NSLog(@"[DK] 旧所有者「%@」是子账号，沙盒为空，跳过备份直接清空", oldOwner);
         [self _recursiveDeleteContentsOfDirectory:sandboxLib];
-        // 确保 sandboxLib 目录存在（递归删除后目录还在）
         if (![fm fileExistsAtPath:sandboxLib]) {
             [fm createDirectoryAtPath:sandboxLib
+          withIntermediateDirectories:YES
+                           attributes:@{NSFileProtectionKey: NSFileProtectionNone}
+                                error:nil];
+        }
+        // 也清空 Documents/（排除 DKAccounts/）
+        [self _recursiveDeleteContentsExceptDKAccounts:sandboxDocs];
+        if (![fm fileExistsAtPath:sandboxDocs]) {
+            [fm createDirectoryAtPath:sandboxDocs
           withIntermediateDirectories:YES
                            attributes:@{NSFileProtectionKey: NSFileProtectionNone}
                                 error:nil];
@@ -468,19 +579,20 @@ static NSString *const kDKLibraryOwnerFile = @".dk_library_owner";
     // Step 2: 恢复目标账号数据或创建空目录
     // ============================================================
     if (currentIsDefault) {
-        // 当前账号是默认：从 .default_backup/ 恢复
-        NSString *targetBackup = [self backupRootPathForAccount:currentAccount];
         NSString *targetBackupLib = [targetBackup stringByAppendingPathComponent:@"Library"];
+        NSString *targetBackupDocs = [targetBackup stringByAppendingPathComponent:@"Documents"];
 
+        // --- 恢复 Library/ ---
         if ([fm fileExistsAtPath:targetBackupLib]) {
-            if (rename([targetBackupLib fileSystemRepresentation], srcPath) == 0) {
-                NSLog(@"[DK] ✅ rename .default_backup/ → Library/（恢复默认账号数据）");
+            if (rename([targetBackupLib fileSystemRepresentation],
+                       [sandboxLib fileSystemRepresentation]) == 0) {
+                NSLog(@"[DK] ✅ rename .default_backup/Library/ → 沙盒");
             } else {
-                NSLog(@"[DK] ⚠️ rename 恢复失败 (errno=%d), 逐个子目录搬移", errno);
+                NSLog(@"[DK] ⚠️ rename 恢复 Library/ 失败 (errno=%d)", errno);
                 [self _moveSubdirectories:targetBackupLib toDirectory:sandboxLib];
             }
         } else {
-            NSLog(@"[DK] ⚠️ .default_backup/ 不存在，创建空 Library/");
+            NSLog(@"[DK] ⚠️ .default_backup/Library/ 不存在，创建空目录");
             if (![fm fileExistsAtPath:sandboxLib]) {
                 [fm createDirectoryAtPath:sandboxLib
               withIntermediateDirectories:YES
@@ -498,16 +610,15 @@ static NSString *const kDKLibraryOwnerFile = @".dk_library_owner";
             }
         }
 
-        // 重新应用会话数据到沙盒（修复跨账号切换后会话丢失）
-        //
-        // ensureDataOwnershipForAccount 用 .default_backup/ 覆盖了沙盒，
-        // 但 .default_backup 是第一次切换时备份的，可能包含过期的 token。
-        // switchToAccount 的 handler 在 exit(0) 前已通过 restoreSessionForAccount
-        // 将最新会话写入沙盒，但被此处的目录恢复覆盖了。
-        //
-        // 因此需要重新调用 restoreSessionForAccount 来应用 .dk_default_session.plist
-        // 中的最新会话数据（__DK_FULL_DOMAIN__ 包含完整 NSUserDefaults 快照）。
-        // 注意：此时 %ctor 尚未安装 Hook，NSUserDefaults 写入直达沙盒。
+        // --- 恢复 Documents/（排除 DKAccounts/ 已在备份中不存在）---
+        if ([fm fileExistsAtPath:targetBackupDocs]) {
+            [self _moveSubdirectories:targetBackupDocs toDirectory:sandboxDocs];
+            NSLog(@"[DK] ✅ .default_backup/Documents/ → 沙盒");
+        } else {
+            NSLog(@"[DK] .default_backup/Documents/ 不存在，保留沙盒现有 Documents/");
+        }
+
+        // 重新应用会话数据到沙盒
         [[DKNetworkSessionManager sharedManager] restoreSessionForAccount:currentAccount
                                                     clearSessionIfMissing:NO];
         NSLog(@"[DK] 默认账号会话已重新应用");
@@ -515,7 +626,6 @@ static NSString *const kDKLibraryOwnerFile = @".dk_library_owner";
     } else {
         // 当前账号是子账号：清空沙盒即可，Hook 会重定向到隔离目录
         NSLog(@"[DK] 当前账号「%@」是子账号，清空沙盒（Hook 将重定向到隔离目录）", currentAccount);
-        // 确保 sandboxLib 存在且有子目录
         if (![fm fileExistsAtPath:sandboxLib]) {
             [fm createDirectoryAtPath:sandboxLib
           withIntermediateDirectories:YES
@@ -530,6 +640,14 @@ static NSString *const kDKLibraryOwnerFile = @".dk_library_owner";
                                attributes:@{NSFileProtectionKey: NSFileProtectionNone}
                                     error:nil];
             }
+        }
+        // 清空 Documents/（排除 DKAccounts/），避免 MMKV 读到默认账号残留数据
+        [self _recursiveDeleteContentsExceptDKAccounts:sandboxDocs];
+        if (![fm fileExistsAtPath:sandboxDocs]) {
+            [fm createDirectoryAtPath:sandboxDocs
+          withIntermediateDirectories:YES
+                           attributes:@{NSFileProtectionKey: NSFileProtectionNone}
+                                error:nil];
         }
     }
 
