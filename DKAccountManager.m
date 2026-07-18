@@ -183,9 +183,38 @@ static NSString *_accountsRootPath = nil;
         NSString *fullPath = [rootPath stringByAppendingPathComponent:item];
         BOOL isDir = NO;
         if ([fm fileExistsAtPath:fullPath isDirectory:&isDir] && isDir) {
-            // 检查是否有元数据文件
+            // 跳过 .default_backup 和 . 开头的系统目录
+            if ([item hasPrefix:@"."] && ![item isEqualToString:@".default_backup"]) {
+                NSLog(@"[DK] refreshAccountList: 跳过隐藏目录 %@", item);
+                continue;
+            }
+
+            // 检查是否为有效账号目录
             NSString *metaPath = [fullPath stringByAppendingPathComponent:@".dk_metadata.plist"];
-            if ([fm fileExistsAtPath:metaPath]) {
+            BOOL hasMetadata = [fm fileExistsAtPath:metaPath];
+
+            if (!hasMetadata) {
+                // 降级检测：.dk_metadata.plist 可能被误删（如之前的 ensureDataOwnershipForAccount bug），
+                // 但账号目录仍有 Library/ 或 Documents/ 子目录，说明是有效账号。
+                // 自动重建 .dk_metadata.plist 以恢复账号识别。
+                NSString *libPath = [fullPath stringByAppendingPathComponent:@"Library"];
+                NSString *docsPath = [fullPath stringByAppendingPathComponent:@"Documents"];
+                BOOL hasLib = [fm fileExistsAtPath:libPath];
+                BOOL hasDocs = [fm fileExistsAtPath:docsPath];
+
+                if (hasLib || hasDocs) {
+                    NSLog(@"[DK] refreshAccountList: 账号「%@」缺少 .dk_metadata.plist，自动重建", item);
+                    NSDictionary *newMeta = @{
+                        @"accountName": item,
+                        @"createdAt": [NSDate date],
+                        @"recovered": @YES
+                    };
+                    [newMeta writeToFile:metaPath atomically:YES];
+                    hasMetadata = YES;
+                }
+            }
+
+            if (hasMetadata) {
                 [_accountNames addObject:item];
                 NSDictionary *meta = [NSDictionary dictionaryWithContentsOfFile:metaPath];
                 if (meta) {

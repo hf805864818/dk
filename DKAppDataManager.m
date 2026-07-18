@@ -391,6 +391,7 @@ static NSString *const kDKLibraryOwnerFile = @".dk_library_owner";
 /// 先删除文件，再递归进入子目录。单文件/空目录的 removeItemAtPath 在 %ctor 阶段必定成功。
 /// 这与 rename() 不同：rename() 在 iOS 上可能因沙箱限制失败，
 /// 但 removeItemAtPath 针对单个文件/空目录总是可行的。
+/// ⚠️ 跳过 DKAccounts/ 目录（账号备份目录），避免误删所有账号数据。
 - (void)_recursiveDeleteContentsOfDirectory:(NSString *)dirPath {
     NSFileManager *fm = [NSFileManager defaultManager];
     NSArray *contents = [fm contentsOfDirectoryAtPath:dirPath error:nil];
@@ -399,6 +400,11 @@ static NSString *const kDKLibraryOwnerFile = @".dk_library_owner";
     for (NSString *item in contents) {
         // 跳过所有权标记文件（后续会重新写入）
         if ([item isEqualToString:kDKLibraryOwnerFile]) continue;
+        // 跳过 DKAccounts/ 目录（账号备份目录，删除会导致所有账号数据丢失）
+        if ([item isEqualToString:@"DKAccounts"]) {
+            NSLog(@"[DK]   ⏭ 跳过 DKAccounts/（账号备份目录，保护账号数据）");
+            continue;
+        }
 
         NSString *itemPath = [dirPath stringByAppendingPathComponent:item];
         BOOL isDir = NO;
@@ -630,7 +636,9 @@ static NSString *const kDKLibraryOwnerFile = @".dk_library_owner";
         }
         BOOL docsMoved = [self _moveDocumentsExceptDKAccounts:sandboxDocs toDirectory:oldBackupDocs];
         if (docsMoved) {
-            [self _recursiveDeleteContentsOfDirectory:sandboxDocs];
+            // 使用 _recursiveDeleteContentsExceptDKAccounts 而非 _recursiveDeleteContentsOfDirectory
+            // 确保 DKAccounts/ 目录不被删除（账号备份目录，删除会导致所有账号数据丢失）
+            [self _recursiveDeleteContentsExceptDKAccounts:sandboxDocs];
         } else {
             NSLog(@"[DK] ⚠️ Documents/ 搬移部分失败，跳过删除源目录，保留数据避免丢失");
         }
