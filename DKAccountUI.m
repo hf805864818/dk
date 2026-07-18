@@ -601,6 +601,7 @@ static char kDKHiddenIndicatorKey;
                     badge.clipsToBounds = YES;
                     [rowView addSubview:badge];
                 }
+            }
             
             rowView.tag = i;
             UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc]
