@@ -286,9 +286,11 @@ static NSString *_accountsRootPath = nil;
     }
     
     // 创建子目录结构（模拟原始沙盒结构）
+    // 注意：tmp/ 和 Library/Caches/ 不隔离，文件分享/上传时
+    // 系统框架（UIActivity/NSItemProvider）可能绕过 Hook，
+    // 若文件在隔离目录中会找不到而崩溃
     NSArray *subDirs = @[@"Documents", @"Library", @"Library/Preferences",
-                         @"Library/Caches", @"Library/Cookies",
-                         @"tmp"];
+                         @"Library/Cookies"];
     for (NSString *sub in subDirs) {
         NSString *subPath = [accountPath stringByAppendingPathComponent:sub];
         [fm createDirectoryAtPath:subPath

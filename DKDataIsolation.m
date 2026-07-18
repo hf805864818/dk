@@ -47,6 +47,18 @@
             return originalPath;
         }
         
+        // 排除 tmp/ 和 Caches/ 目录 — 临时文件/缓存目录
+        // 这些目录用于文件分享（UIActivity）、上传预览、系统缓存等，
+        // 系统框架（NSItemProvider、NSFileCoordinator）可能绕过 Hook，
+        // 若文件在隔离目录中，分享/上传时会因找不到文件而崩溃。
+        // tmp/ 和 Caches/ 是临时/可清除数据，无需账号隔离。
+        if ([relativePath hasPrefix:@"/tmp/"] || [relativePath isEqualToString:@"/tmp"]) {
+            return originalPath;
+        }
+        if ([relativePath hasPrefix:@"/Library/Caches/"] || [relativePath isEqualToString:@"/Library/Caches"]) {
+            return originalPath;
+        }
+        
         NSString *mappedPath = [accountDataPath stringByAppendingPathComponent:relativePath];
         
         // 确保父目录存在
