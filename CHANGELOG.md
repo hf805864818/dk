@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.0.58] - 2026-07-18
+
+- da6b618 修复子账号 NSUserDefaults 隔离 plist 丢失问题
+
+
 ## [1.0.57] - 2026-07-18
 
 - 347b639 fix: backup and restore Documents/ (MMKV data) alongside Library/ in ensureDataOwnershipForAccount
