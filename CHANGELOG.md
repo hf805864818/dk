@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.0.57] - 2026-07-18
+
+- 347b639 fix: backup and restore Documents/ (MMKV data) alongside Library/ in ensureDataOwnershipForAccount
+
+
 ## [1.0.56] - 2026-07-17
 
 - 5d3d4db fix: reorder _currentAccountName assignment in switchToAccount handler
