@@ -348,6 +348,71 @@ static NSString *_accountsRootPath = nil;
     return YES;
 }
 
+- (BOOL)renameAccount:(NSString *)oldName toName:(NSString *)newName {
+    if (!oldName || !newName) return NO;
+    if (oldName.length == 0 || newName.length == 0) return NO;
+    if ([oldName isEqualToString:kDKDefaultAccountName]) return NO;
+    if ([newName isEqualToString:kDKDefaultAccountName]) return NO;
+    if ([oldName isEqualToString:newName]) return YES; // 同名无需操作
+    if (![_accountNames containsObject:oldName]) return NO;
+    if ([_accountNames containsObject:newName]) return NO; // 新名称已存在
+    
+    // 跳过 . 和 _ 开头的名称（内部保留前缀）
+    if ([newName hasPrefix:@"."] || [newName hasPrefix:@"_"]) {
+        NSLog(@"[DK] 账号名不能以 . 或 _ 开头");
+        return NO;
+    }
+    
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *rootPath = self.accountsRootPath;
+    NSString *oldPath = [rootPath stringByAppendingPathComponent:oldName];
+    NSString *newPath = [rootPath stringByAppendingPathComponent:newName];
+    
+    // 重命名目录
+    if ([fm fileExistsAtPath:oldPath]) {
+        if (rename([oldPath fileSystemRepresentation], [newPath fileSystemRepresentation]) != 0) {
+            // rename 失败，尝试 copy + delete
+            if (![fm copyItemAtPath:oldPath toPath:newPath error:nil]) {
+                NSLog(@"[DK] 重命名目录失败: %@ → %@", oldName, newName);
+                return NO;
+            }
+            [fm removeItemAtPath:oldPath error:nil];
+        }
+    }
+    
+    // 更新元数据
+    NSString *metaPath = [newPath stringByAppendingPathComponent:@".dk_metadata.plist"];
+    NSMutableDictionary *meta = [[NSDictionary dictionaryWithContentsOfFile:metaPath] mutableCopy] ?: [NSMutableDictionary dictionary];
+    meta[@"name"] = newName;
+    meta[@"renamedAt"] = [NSDate date];
+    [meta writeToFile:metaPath atomically:YES];
+    
+    // 更新内存中的账号列表和元数据缓存
+    NSUInteger idx = [_accountNames indexOfObject:oldName];
+    if (idx != NSNotFound) {
+        [_accountNames replaceObjectAtIndex:idx withObject:newName];
+    }
+    [_metadataCache removeObjectForKey:oldName];
+    _metadataCache[newName] = meta;
+    
+    // 如果重命名的是当前活跃账号，同步更新
+    if ([_currentAccountName isEqualToString:oldName]) {
+        _currentAccountName = newName;
+        [self _saveCurrentAccountToFile:newName];
+    }
+    
+    // 如果重命名的是指定默认账号，同步更新
+    if (_designatedDefaultAccountName && [_designatedDefaultAccountName isEqualToString:oldName]) {
+        _designatedDefaultAccountName = newName;
+        [self _saveDesignatedDefault:newName];
+    }
+    
+    [self _saveAccountList];
+    
+    NSLog(@"[DK] 账号已重命名: %@ → %@", oldName, newName);
+    return YES;
+}
+
 - (BOOL)clearAllMultiAccountData {
     NSFileManager *fm = [NSFileManager defaultManager];
     NSString *rootPath = self.accountsRootPath;

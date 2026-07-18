@@ -30,6 +30,9 @@
 /// 删除账号
 - (BOOL)deleteAccountWithName:(NSString *)name;
 
+/// 重命名账号（目录重命名 + 元数据更新）
+- (BOOL)renameAccount:(NSString *)oldName toName:(NSString *)newName;
+
 /// 清理所有多开账号数据，保留默认账号原始数据
 - (BOOL)clearAllMultiAccountData;
 

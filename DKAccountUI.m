@@ -730,16 +730,21 @@ static char kDKHiddenIndicatorKey;
     
     NSInteger index = gesture.view.tag;
     // 0: add, 1: default (can't delete), 2..N+1: accounts
-    if (index <= 1) return; // 添加账号和默认账号不能删除
+    if (index <= 1) return; // 添加账号和默认账号不能操作
     
     NSArray *accounts = [[DKAccountManager sharedManager] allAccountNames];
     NSString *accountName = accounts[index - 2];
     
-    // 弹出删除确认
     dispatch_async(dispatch_get_main_queue(), ^{
         UIAlertController *alert = [UIAlertController alertControllerWithTitle:accountName
                                                                        message:nil
                                                                 preferredStyle:UIAlertControllerStyleActionSheet];
+        
+        [alert addAction:[UIAlertAction actionWithTitle:@"重命名"
+                                                  style:UIAlertActionStyleDefault
+                                                handler:^(UIAlertAction *action) {
+            [self _promptRenameAccount:accountName];
+        }]];
         
         [alert addAction:[UIAlertAction actionWithTitle:@"删除账号"
                                                   style:UIAlertActionStyleDestructive
@@ -843,6 +848,47 @@ static char kDKHiddenIndicatorKey;
         
         [alert addAction:cancelAction];
         [alert addAction:deleteAction];
+        
+        UIViewController *rootVC = [self _rootViewController];
+        [rootVC presentViewController:alert animated:YES completion:nil];
+    });
+}
+
+#pragma mark - 重命名账号
+
+- (void)_promptRenameAccount:(NSString *)accountName {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"重命名账号"
+                                                                       message:[NSString stringWithFormat:@"当前名称: %@", accountName]
+                                                                preferredStyle:UIAlertControllerStyleAlert];
+        
+        [alert addTextFieldWithConfigurationHandler:^(UITextField *textField) {
+            textField.text = accountName;
+            textField.placeholder = @"输入新名称";
+            textField.clearButtonMode = UITextFieldViewModeWhileEditing;
+        }];
+        
+        UIAlertAction *cancelAction = [UIAlertAction actionWithTitle:@"取消"
+                                                               style:UIAlertActionStyleCancel
+                                                             handler:nil];
+        
+        UIAlertAction *confirmAction = [UIAlertAction actionWithTitle:@"确定"
+                                                                style:UIAlertActionStyleDefault
+                                                              handler:^(UIAlertAction *action) {
+            NSString *newName = alert.textFields.firstObject.text;
+            newName = [newName stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+            if (newName.length > 0 && ![newName isEqualToString:accountName]) {
+                BOOL success = [[DKAccountManager sharedManager] renameAccount:accountName toName:newName];
+                if (success) {
+                    [self _showToast:[NSString stringWithFormat:@"已重命名为: %@", newName]];
+                } else {
+                    [self _showToast:@"重命名失败，名称可能已存在或无效"];
+                }
+            }
+        }];
+        
+        [alert addAction:cancelAction];
+        [alert addAction:confirmAction];
         
         UIViewController *rootVC = [self _rootViewController];
         [rootVC presentViewController:alert animated:YES completion:nil];
