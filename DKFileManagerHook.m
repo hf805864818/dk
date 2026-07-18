@@ -56,6 +56,9 @@ NSString* DKRemapFilePath(NSString *path) {
     if ([[manager currentAccountName] isEqualToString:[manager defaultAccountName]]) return path;
     NSString *designatedDefault = [manager designatedDefaultAccountName];
     if (designatedDefault && [[manager currentAccountName] isEqualToString:designatedDefault]) return path;
+    // DKAccounts/ 目录下的操作不重定向，始终操作真实沙盒
+    // 否则 renameAccount/deleteAccount 等账号管理操作会被错误重定向到隔离目录
+    if ([path containsString:@"Documents/DKAccounts/"]) return path;
     return DKMapPath(path);
 }
 
