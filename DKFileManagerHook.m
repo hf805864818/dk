@@ -54,6 +54,8 @@ NSString* DKRemapFilePath(NSString *path) {
     DKAccountManager *manager = [DKAccountManager sharedManager];
     if (manager.isSwitching) return path;
     if ([[manager currentAccountName] isEqualToString:[manager defaultAccountName]]) return path;
+    NSString *designatedDefault = [manager designatedDefaultAccountName];
+    if (designatedDefault && [[manager currentAccountName] isEqualToString:designatedDefault]) return path;
     return DKMapPath(path);
 }
 

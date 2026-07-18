@@ -127,6 +127,11 @@ static int (*original_stat)(const char *path, struct stat *buf);
 static int (*original_lstat)(const char *path, struct stat *buf);
 static int (*original_access)(const char *path, int mode);
 static FILE *(*original_fopen)(const char *path, const char *mode);
+static int (*original_unlink)(const char *path);
+static int (*original_unlinkat)(int fd, const char *path, int flag);
+static int (*original_rename)(const char *old, const char *new);
+static int (*original_mkdir)(const char *path, mode_t mode);
+static int (*original_mkdirat)(int fd, const char *path, mode_t mode);
 
 static int hooked_open(const char *path, int flags, ...);
 static int hooked_openat(int fd, const char *path, int flags, ...);
@@ -134,6 +139,11 @@ static int hooked_stat(const char *path, struct stat *buf);
 static int hooked_lstat(const char *path, struct stat *buf);
 static int hooked_access(const char *path, int mode);
 static FILE *hooked_fopen(const char *path, const char *mode);
+static int hooked_unlink(const char *path);
+static int hooked_unlinkat(int fd, const char *path, int flag);
+static int hooked_rename(const char *old, const char *new);
+static int hooked_mkdir(const char *path, mode_t mode);
+static int hooked_mkdirat(int fd, const char *path, mode_t mode);
 
 // CFPreferences 隔离用 plist 路径
 // 与 NSUserDefaults Hook 共享同一个账号隔离 plist，
@@ -669,7 +679,70 @@ didReceiveNotificationResponse:(UNNotificationResponse *)response
 
 %end
 
+// ============================================================
+// Hook 8: NSFileManager - 文件管理器路径重定向（关键！）
+//
+// TRAE 大量使用 NSFileManager 进行文件操作（copyItemAtPath:、
+// createDirectoryAtPath:、fileExistsAtPath: 等），这些方法
+// 之前完全未被 Hook。子账号时 TRAE 通过这些方法直接读写
+// 沙盒路径，绕过所有隔离逻辑。
+//
+// 这是导致子账号和默认账号切换后都进入登录页的根本原因。
+// ============================================================
+%hook NSFileManager
 
+- (BOOL)fileExistsAtPath:(NSString *)path {
+    return %orig(DKRemapFilePath(path));
+}
+
+- (BOOL)fileExistsAtPath:(NSString *)path isDirectory:(BOOL *)isDirectory {
+    return %orig(DKRemapFilePath(path), isDirectory);
+}
+
+- (BOOL)createDirectoryAtPath:(NSString *)path
+  withIntermediateDirectories:(BOOL)intermediates
+                   attributes:(NSDictionary *)attributes
+                        error:(NSError **)error {
+    return %orig(DKRemapFilePath(path), intermediates, attributes, error);
+}
+
+- (NSArray *)contentsOfDirectoryAtPath:(NSString *)path error:(NSError **)error {
+    return %orig(DKRemapFilePath(path), error);
+}
+
+- (BOOL)copyItemAtPath:(NSString *)srcPath toPath:(NSString *)dstPath error:(NSError **)error {
+    return %orig(DKRemapFilePath(srcPath), DKRemapFilePath(dstPath), error);
+}
+
+- (BOOL)moveItemAtPath:(NSString *)srcPath toPath:(NSString *)dstPath error:(NSError **)error {
+    return %orig(DKRemapFilePath(srcPath), DKRemapFilePath(dstPath), error);
+}
+
+- (BOOL)removeItemAtPath:(NSString *)path error:(NSError **)error {
+    return %orig(DKRemapFilePath(path), error);
+}
+
+- (BOOL)createFileAtPath:(NSString *)path contents:(NSData *)data attributes:(NSDictionary *)attr {
+    return %orig(DKRemapFilePath(path), data, attr);
+}
+
+- (NSDictionary *)attributesOfItemAtPath:(NSString *)path error:(NSError **)error {
+    return %orig(DKRemapFilePath(path), error);
+}
+
+- (BOOL)isReadableFileAtPath:(NSString *)path {
+    return %orig(DKRemapFilePath(path));
+}
+
+- (BOOL)isWritableFileAtPath:(NSString *)path {
+    return %orig(DKRemapFilePath(path));
+}
+
+- (BOOL)isDeletableFileAtPath:(NSString *)path {
+    return %orig(DKRemapFilePath(path));
+}
+
+%end
 
 // ============================================================
 // 构造函数 - 插件加载时调用
@@ -801,16 +874,21 @@ didReceiveNotificationResponse:(UNNotificationResponse *)response
             {"CFPreferencesCopyKeyList",    hooked_CFPreferencesCopyKeyList,    (void **)&original_CFPreferencesCopyKeyList},
             {"CFPreferencesSetMultiple",    hooked_CFPreferencesSetMultiple,    (void **)&original_CFPreferencesSetMultiple},
             {"CFPreferencesCopyMultiple",   hooked_CFPreferencesCopyMultiple,   (void **)&original_CFPreferencesCopyMultiple},
-            // POSIX 文件操作（6 个）— 拦截 MMKV/WCDB 等 C/C++ 库的直接文件 I/O
+            // POSIX 文件操作（11 个）— 拦截 MMKV/WCDB 等 C/C++ 库的直接文件 I/O
             {"open",    hooked_open,    (void **)&original_open},
             {"openat",  hooked_openat,  (void **)&original_openat},
             {"stat",    hooked_stat,    (void **)&original_stat},
             {"lstat",   hooked_lstat,   (void **)&original_lstat},
             {"access",  hooked_access,  (void **)&original_access},
             {"fopen",   hooked_fopen,   (void **)&original_fopen},
+            {"unlink",  hooked_unlink,  (void **)&original_unlink},
+            {"unlinkat",hooked_unlinkat,(void **)&original_unlinkat},
+            {"rename",  hooked_rename,  (void **)&original_rename},
+            {"mkdir",   hooked_mkdir,   (void **)&original_mkdir},
+            {"mkdirat", hooked_mkdirat, (void **)&original_mkdirat},
         };
         rebind_symbols(rebindings, sizeof(rebindings) / sizeof(struct rebinding));
-        NSLog(@"[DK] fishhook C 函数 Hook 已安装（19 个：Keychain 4 + CFPreferences 9 + POSIX 6）");
+        NSLog(@"[DK] fishhook C 函数 Hook 已安装（24 个：Keychain 4 + CFPreferences 9 + POSIX 11）");
 
         // ============================================
         // 第三步：关闭启动保护
@@ -944,6 +1022,37 @@ static FILE *hooked_fopen(const char *path, const char *mode) {
     NSString *holder = nil;
     const char *mappedPath = DKRemapCFilepath(path, &holder);
     return original_fopen(mappedPath, mode);
+}
+
+static int hooked_unlink(const char *path) {
+    NSString *holder = nil;
+    const char *mappedPath = DKRemapCFilepath(path, &holder);
+    return original_unlink(mappedPath);
+}
+
+static int hooked_unlinkat(int fd, const char *path, int flag) {
+    NSString *holder = nil;
+    const char *mappedPath = DKRemapCFilepath(path, &holder);
+    return original_unlinkat(fd, mappedPath, flag);
+}
+
+static int hooked_rename(const char *old, const char *new) {
+    NSString *oldHolder = nil, *newHolder = nil;
+    const char *mappedOld = DKRemapCFilepath(old, &oldHolder);
+    const char *mappedNew = DKRemapCFilepath(new, &newHolder);
+    return original_rename(mappedOld, mappedNew);
+}
+
+static int hooked_mkdir(const char *path, mode_t mode) {
+    NSString *holder = nil;
+    const char *mappedPath = DKRemapCFilepath(path, &holder);
+    return original_mkdir(mappedPath, mode);
+}
+
+static int hooked_mkdirat(int fd, const char *path, mode_t mode) {
+    NSString *holder = nil;
+    const char *mappedPath = DKRemapCFilepath(path, &holder);
+    return original_mkdirat(fd, mappedPath, mode);
 }
 
 // ============================================================

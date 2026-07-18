@@ -29,6 +29,11 @@
     if ([currentAccount isEqualToString:[manager defaultAccountName]]) {
         return originalPath;
     }
+    // 指定默认账号也不映射
+    NSString *designatedDefault = [manager designatedDefaultAccountName];
+    if (designatedDefault && [currentAccount isEqualToString:designatedDefault]) {
+        return originalPath;
+    }
     
     NSString *homePath = NSHomeDirectory();
     NSString *accountDataPath = [manager dataPathForAccount:currentAccount];

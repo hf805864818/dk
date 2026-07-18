@@ -102,11 +102,12 @@
 }
 
 /// 逐个子目录搬移
-/// 始终返回 YES —— 个别子目录搬移失败不阻塞整体流程。
-/// 失败的子目录会被记录日志但不会导致账号切换失败。
+/// 返回 YES 表示全部成功搬移，NO 表示有部分子目录搬移失败。
+/// 调用方应根据返回值决定是否清理源目录。
 - (BOOL)_moveSubdirectories:(NSString *)srcDir toDirectory:(NSString *)dstDir {
     NSFileManager *fm = [NSFileManager defaultManager];
     NSError *error = nil;
+    __block BOOL allSucceeded = YES;
 
     [fm createDirectoryAtPath:dstDir
   withIntermediateDirectories:YES
@@ -116,8 +117,7 @@
     NSArray *contents = [fm contentsOfDirectoryAtPath:srcDir error:&error];
     if (error) {
         NSLog(@"[DK] 列出源目录内容失败: %@", error);
-        // 即使列出失败也返回 YES，不阻塞整体流程
-        return YES;
+        return NO;
     }
 
     for (NSString *item in contents) {
@@ -141,39 +141,45 @@
             });
         }
 
+        BOOL moved = NO;
+
         // 先尝试 rename（最快，只改目录项）
         if (rename([srcItem fileSystemRepresentation], [dstItem fileSystemRepresentation]) == 0) {
             NSLog(@"[DK]   ✅ %@ (rename)", item);
-            continue;
+            moved = YES;
         }
 
         // 再尝试 moveItemAtPath
-        if ([fm moveItemAtPath:srcItem toPath:dstItem error:&error]) {
+        if (!moved && [fm moveItemAtPath:srcItem toPath:dstItem error:&error]) {
             NSLog(@"[DK]   ✅ %@ (move)", item);
-            continue;
+            moved = YES;
         }
 
         // 最后尝试 copy + delete
-        if ([fm copyItemAtPath:srcItem toPath:dstItem error:&error]) {
+        if (!moved && [fm copyItemAtPath:srcItem toPath:dstItem error:&error]) {
             [fm removeItemAtPath:srcItem error:nil];
             NSLog(@"[DK]   ✅ %@ (copy+delete)", item);
-            continue;
+            moved = YES;
         }
 
-        // 三层都失败，记录日志但不阻塞
-        NSLog(@"[DK]   ⚠️ %@ 搬移失败（跳过）: %@", item, error);
+        if (!moved) {
+            // 三层都失败，标记失败但不阻塞
+            NSLog(@"[DK]   ⚠️ %@ 搬移失败（跳过，不删除源文件以避免数据丢失）: %@", item, error);
+            allSucceeded = NO;
+        }
     }
 
-    // 清理源目录（如果为空）
-    NSArray *remaining = [fm contentsOfDirectoryAtPath:srcDir error:nil];
-    if (remaining.count == 0) {
-        [fm removeItemAtPath:srcDir error:nil];
+    // 清理源目录（仅当全部成功时删除，否则保留源文件避免数据丢失）
+    if (allSucceeded) {
+        NSArray *remaining = [fm contentsOfDirectoryAtPath:srcDir error:nil];
+        if (remaining.count == 0) {
+            [fm removeItemAtPath:srcDir error:nil];
+        }
     } else {
-        NSLog(@"[DK] 源目录仍有 %lu 项未搬移: %@", (unsigned long)remaining.count, remaining);
+        NSLog(@"[DK] ⚠️ 部分文件搬移失败，源目录未删除，保留数据避免丢失");
     }
 
-    // 始终返回 YES，不因个别失败阻塞
-    return YES;
+    return allSucceeded;
 }
 
 #pragma mark - 公开接口
@@ -410,16 +416,18 @@ static NSString *const kDKLibraryOwnerFile = @".dk_library_owner";
 /// 将 Documents/ 中除 DKAccounts/ 外的所有内容搬移到目标目录。
 /// 用于备份默认账号的 MMKV（bullet/mmkv.default/SLIMKit 等）数据。
 /// DKAccounts/ 是账户备份目录自身，搬移会形成递归，必须跳过。
-- (void)_moveDocumentsExceptDKAccounts:(NSString *)srcDocs toDirectory:(NSString *)dstDocs {
+/// 返回 YES 表示全部成功搬移，NO 表示有部分失败。
+- (BOOL)_moveDocumentsExceptDKAccounts:(NSString *)srcDocs toDirectory:(NSString *)dstDocs {
     NSFileManager *fm = [NSFileManager defaultManager];
     NSError *error = nil;
+    __block BOOL allSucceeded = YES;
 
     if (![fm fileExistsAtPath:srcDocs]) {
         [fm createDirectoryAtPath:dstDocs
       withIntermediateDirectories:YES
                        attributes:@{NSFileProtectionKey: NSFileProtectionNone}
                             error:nil];
-        return;
+        return YES;
     }
 
     [fm createDirectoryAtPath:dstDocs
@@ -430,7 +438,7 @@ static NSString *const kDKLibraryOwnerFile = @".dk_library_owner";
     NSArray *contents = [fm contentsOfDirectoryAtPath:srcDocs error:&error];
     if (error) {
         NSLog(@"[DK] 列出 Documents/ 内容失败: %@", error);
-        return;
+        return NO;
     }
 
     for (NSString *item in contents) {
@@ -451,21 +459,28 @@ static NSString *const kDKLibraryOwnerFile = @".dk_library_owner";
             });
         }
 
+        BOOL moved = NO;
+
         if (rename([srcItem fileSystemRepresentation], [dstItem fileSystemRepresentation]) == 0) {
             NSLog(@"[DK]   ✅ %@ (rename)", item);
-            continue;
+            moved = YES;
         }
-        if ([fm moveItemAtPath:srcItem toPath:dstItem error:&error]) {
+        if (!moved && [fm moveItemAtPath:srcItem toPath:dstItem error:&error]) {
             NSLog(@"[DK]   ✅ %@ (move)", item);
-            continue;
+            moved = YES;
         }
-        if ([fm copyItemAtPath:srcItem toPath:dstItem error:&error]) {
+        if (!moved && [fm copyItemAtPath:srcItem toPath:dstItem error:&error]) {
             [fm removeItemAtPath:srcItem error:nil];
             NSLog(@"[DK]   ✅ %@ (copy+delete)", item);
-            continue;
+            moved = YES;
         }
-        NSLog(@"[DK]   ⚠️ %@ 搬移失败（跳过）: %@", item, error);
+        if (!moved) {
+            NSLog(@"[DK]   ⚠️ %@ 搬移失败（跳过，不删除源文件）: %@", item, error);
+            allSucceeded = NO;
+        }
     }
+
+    return allSucceeded;
 }
 
 /// 递归删除 Documents/ 内容（跳过 DKAccounts/）。
@@ -595,9 +610,13 @@ static NSString *const kDKLibraryOwnerFile = @".dk_library_owner";
         if (libRenameOK) {
             NSLog(@"[DK] ✅ rename Library/ → .default_backup/");
         } else {
-            NSLog(@"[DK] ⚠️ rename Library/ 失败 (errno=%d), 改用递归删除", errno);
-            [self _moveSubdirectories:sandboxLib toDirectory:oldBackupLib];
-            [self _recursiveDeleteContentsOfDirectory:sandboxLib];
+            NSLog(@"[DK] ⚠️ rename Library/ 失败 (errno=%d), 改用逐文件搬移", errno);
+            BOOL moved = [self _moveSubdirectories:sandboxLib toDirectory:oldBackupLib];
+            if (moved) {
+                [self _recursiveDeleteContentsOfDirectory:sandboxLib];
+            } else {
+                NSLog(@"[DK] ⚠️ moveSubdirectories 部分失败，跳过删除源目录，保留数据避免丢失");
+            }
         }
 
         // --- 备份 Documents/（排除 DKAccounts/）---
@@ -609,8 +628,12 @@ static NSString *const kDKLibraryOwnerFile = @".dk_library_owner";
                 [[NSFileManager defaultManager] removeItemAtPath:tmpDocs error:nil];
             });
         }
-        [self _moveDocumentsExceptDKAccounts:sandboxDocs toDirectory:oldBackupDocs];
-        [self _recursiveDeleteContentsOfDirectory:sandboxDocs];
+        BOOL docsMoved = [self _moveDocumentsExceptDKAccounts:sandboxDocs toDirectory:oldBackupDocs];
+        if (docsMoved) {
+            [self _recursiveDeleteContentsOfDirectory:sandboxDocs];
+        } else {
+            NSLog(@"[DK] ⚠️ Documents/ 搬移部分失败，跳过删除源目录，保留数据避免丢失");
+        }
         // 确保 Documents/ 目录存在
         if (![fm fileExistsAtPath:sandboxDocs]) {
             [fm createDirectoryAtPath:sandboxDocs
