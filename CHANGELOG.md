@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.0.65] - 2026-07-18
+
+- 0c63ef3 修复：改用 hasPrefix + accountsRootPath 精确匹配 DKAccounts 路径
+
+
 ## [1.0.64] - 2026-07-18
 
 - 6e275d1 修复：重命名后旧名称仍显示在账号列表
