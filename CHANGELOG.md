@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.0.66] - 2026-07-18
+
+- 826cdaa 增强 renameAccount：新增旧目录残留清理逻辑
+
+
 ## [1.0.65] - 2026-07-18
 
 - 0c63ef3 修复：改用 hasPrefix + accountsRootPath 精确匹配 DKAccounts 路径
