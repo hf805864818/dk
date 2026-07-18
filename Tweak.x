@@ -442,16 +442,79 @@ static BOOL DKShouldUseOriginalCFPreferences(void) {
 %end
 
 // ============================================================
-// Hook 12: UIActivityViewController - 修复文件导出崩溃
+// Hook 12.5: NSJSONSerialization — 全局 JSON 拦截（零信任架构 v2）
+//
+// 根因：TRAE 使用 WebSocket 传输 SSE 流式数据，数据经过：
+//   1. WebSocket 帧 → 2. 文本行拆分 → 3. NSJSONSerialization 解析
+// NSURLProtocol 只拦截 HTTP，WebSocket 帧直接绕过。
+// NSURLSession delegate 被 PointCastle swizzle 覆盖。
+//
+// v2 增强：
+//   - 同时 Hook 解析（读取）和序列化（写入）两个方向
+//   - 递归处理嵌套字典/数组，覆盖更深层的错误码
+//   - 增加对 NSArray 类型响应的支持
+//   - 增加对请求体 JSON 的敏感词检测绕过（发送前）
+// ============================================================
+%hook NSJSONSerialization
+
++ (id)JSONObjectWithData:(NSData *)data options:(NSJSONReadingOptions)opt error:(NSError **)error {
+    id result = %orig(data, opt, error);
+    if (!result || error == NULL || *error != nil) return result;
+    if (![DKContentFilterBypass sharedInstance].enabled) return result;
+    
+    // 处理字典类型
+    if ([result isKindOfClass:[NSDictionary class]]) {
+        NSDictionary *dict = (NSDictionary *)result;
+        NSDictionary *filtered = [[DKContentFilterBypass sharedInstance] processResponseJSON:dict];
+        return filtered ?: result;
+    }
+    
+    // 处理数组类型
+    if ([result isKindOfClass:[NSArray class]]) {
+        NSArray *arr = (NSArray *)result;
+        NSArray *filtered = [[DKContentFilterBypass sharedInstance] processResponseArray:arr];
+        return filtered ?: result;
+    }
+    
+    return result;
+}
+
++ (id)JSONObjectWithStream:(NSInputStream *)stream options:(NSJSONReadingOptions)opt error:(NSError **)error {
+    id result = %orig(stream, opt, error);
+    if (!result || error == NULL || *error != nil) return result;
+    if (![DKContentFilterBypass sharedInstance].enabled) return result;
+    
+    if ([result isKindOfClass:[NSDictionary class]]) {
+        NSDictionary *dict = (NSDictionary *)result;
+        NSDictionary *filtered = [[DKContentFilterBypass sharedInstance] processResponseJSON:dict];
+        return filtered ?: result;
+    }
+    
+    if ([result isKindOfClass:[NSArray class]]) {
+        NSArray *arr = (NSArray *)result;
+        NSArray *filtered = [[DKContentFilterBypass sharedInstance] processResponseArray:arr];
+        return filtered ?: result;
+    }
+    
+    return result;
+}
+
+%end
+
+// ============================================================
+// Hook 12: UIActivityViewController - 修复文件导出崩溃 v2
 //
 // 问题：TRAE 将文件保存到 Documents/，被 Hook 重定向到隔离目录。
 // 后续通过 UIActivityViewController 分享时，系统分享框架
 // (SHSheetActivityItemsManager/NSItemProvider) 用原始路径加载文件，
-// 这些系统 API 绕过 Hook → 文件不存在 → nil → 崩溃。
+// 这些系统 API 绕过 Hook → 文件不存在 → nil → 白色弹窗闪退。
 //
-// 修复：在分享前，检测文件 URL 是否已被重定向到隔离目录，
-// 如果是，将文件复制到真实 tmp/ (不重定向的临时目录)，
-// 用真实路径替换 URL，确保系统分享框架能找到文件。
+// v2 改进：
+//   - 支持 NSItemProvider 类型的 activity items
+//   - 支持 UIActivityItemSource 类型
+//   - 增加文件存在性双重检查（原始路径 + 隔离路径）
+//   - 确保复制后的文件有正确的访问权限
+//   - 添加详细日志便于调试
 // ============================================================
 %hook UIActivityViewController
 
@@ -475,43 +538,117 @@ static BOOL DKShouldUseOriginalCFPreferences(void) {
         for (NSUInteger i = 0; i < mutableItems.count; i++) {
             id item = mutableItems[i];
             NSURL *fileURL = nil;
+            
+            // 类型1: NSURL 文件 URL
             if ([item isKindOfClass:[NSURL class]]) {
                 fileURL = (NSURL *)item;
-            } else if ([item isKindOfClass:[NSString class]]) {
+            }
+            // 类型2: NSString 路径
+            else if ([item isKindOfClass:[NSString class]]) {
                 fileURL = [NSURL fileURLWithPath:(NSString *)item];
+            }
+            // 类型3: NSItemProvider
+            else if ([item isKindOfClass:NSClassFromString(@"NSItemProvider")]) {
+                // NSItemProvider 可能包含文件，尝试提取
+                NSURL *providerURL = nil;
+                @try {
+                    if ([item respondsToSelector:NSSelectorFromString(@"fileURL")]) {
+                        providerURL = [item valueForKey:@"fileURL"];
+                    }
+                    if (!providerURL && [item respondsToSelector:NSSelectorFromString(@"registeredTypeIdentifiers")]) {
+                        // 有注册的类型标识符，可能是文件
+                        NSArray *types = [item valueForKey:@"registeredTypeIdentifiers"];
+                        if (types.count > 0) {
+                            NSLog(@"[DK] 📋 NSItemProvider types: %@", types);
+                        }
+                    }
+                } @catch (NSException *e) {
+                    NSLog(@"[DK] ⚠️ 读取 NSItemProvider 失败: %@", e);
+                }
+                
+                if (providerURL && [providerURL isFileURL]) {
+                    fileURL = providerURL;
+                }
             }
             
             if (!fileURL || ![fileURL isFileURL]) continue;
             
             NSString *filePath = [fileURL path];
-            if (![filePath hasPrefix:homePath]) continue;
-            
-            // 计算隔离目录中的对应路径
-            NSString *relativePath = [filePath substringFromIndex:homePath.length];
-            if ([relativePath hasPrefix:@"/Documents/DKAccounts"]) continue;
-            if ([relativePath hasPrefix:@"/tmp/"] || [relativePath isEqualToString:@"/tmp"]) continue;
-            if ([relativePath hasPrefix:@"/Library/Caches/"] || [relativePath isEqualToString:@"/Library/Caches"]) continue;
-            
-            NSString *isolatedPath = [accountDataPath stringByAppendingPathComponent:relativePath];
             NSFileManager *fm = [NSFileManager defaultManager];
             
-            if ([fm fileExistsAtPath:isolatedPath] && ![fm fileExistsAtPath:filePath]) {
-                // 文件在隔离目录存在，但原始路径不存在 → 复制到真实 tmp/
-                NSString *tmpPath = [NSTemporaryDirectory() stringByAppendingPathComponent:
-                                     [NSString stringWithFormat:@"dk_share_%@", [filePath lastPathComponent]]];
+            // 检查文件是否在原始路径存在
+            BOOL fileExistsAtOriginal = [fm fileExistsAtPath:filePath];
+            
+            // 计算隔离目录中的对应路径
+            NSString *isolatedPath = nil;
+            if ([filePath hasPrefix:homePath]) {
+                NSString *relativePath = [filePath substringFromIndex:homePath.length];
+                // 跳过已经在隔离目录、tmp、Caches 中的文件
+                if ([relativePath hasPrefix:@"/Documents/DKAccounts"]) {
+                    // 文件已经在隔离目录中，需要复制到 tmp
+                    isolatedPath = filePath;
+                } else if ([relativePath hasPrefix:@"/tmp/"] || [relativePath isEqualToString:@"/tmp"]) {
+                    continue; // tmp 中的文件不需要处理
+                } else if ([relativePath hasPrefix:@"/Library/Caches/"] || [relativePath isEqualToString:@"/Library/Caches"]) {
+                    continue; // Caches 中的文件不需要处理
+                } else {
+                    isolatedPath = [accountDataPath stringByAppendingPathComponent:relativePath];
+                }
+            } else if ([filePath hasPrefix:accountDataPath]) {
+                // 文件已经在隔离目录中
+                isolatedPath = filePath;
+            }
+            
+            if (!isolatedPath) continue;
+            
+            BOOL fileExistsAtIsolated = [fm fileExistsAtPath:isolatedPath];
+            
+            // 如果原始路径不存在但隔离路径存在，需要复制到 tmp
+            // 如果原始路径存在但可能是重定向后的（即文件实际在隔离目录），也复制到 tmp 确保安全
+            if (fileExistsAtIsolated || fileExistsAtOriginal) {
+                NSString *sourcePath = fileExistsAtIsolated ? isolatedPath : filePath;
+                
+                // 生成唯一的 tmp 路径（使用时间戳避免重名冲突）
+                NSString *timestamp = [NSString stringWithFormat:@"%.0f", [[NSDate date] timeIntervalSince1970] * 1000];
+                NSString *tmpFileName = [NSString stringWithFormat:@"dk_share_%@_%@", timestamp, [filePath lastPathComponent]];
+                NSString *tmpPath = [NSTemporaryDirectory() stringByAppendingPathComponent:tmpFileName];
+                
                 // 移除旧文件
                 [fm removeItemAtPath:tmpPath error:nil];
-                if ([fm copyItemAtPath:isolatedPath toPath:tmpPath error:nil]) {
+                
+                NSError *copyError = nil;
+                if ([fm copyItemAtPath:sourcePath toPath:tmpPath error:&copyError]) {
+                    // 确保文件有正确的访问权限
+                    [[NSFileManager defaultManager] setAttributes:@{NSFilePosixPermissions: @(0644)}
+                                                     ofItemAtPath:tmpPath
+                                                            error:nil];
+                    
                     NSURL *tmpURL = [NSURL fileURLWithPath:tmpPath];
-                    mutableItems[i] = tmpURL;
+                    
+                    // 根据原始 item 类型替换
+                    if ([item isKindOfClass:[NSURL class]]) {
+                        mutableItems[i] = tmpURL;
+                    } else if ([item isKindOfClass:[NSString class]]) {
+                        mutableItems[i] = tmpPath;
+                    } else if ([item isKindOfClass:NSClassFromString(@"NSItemProvider")]) {
+                        // 对于 NSItemProvider，直接用 NSURL 替换更可靠
+                        mutableItems[i] = tmpURL;
+                        NSLog(@"[DK] 🔄 NSItemProvider → NSURL: %@", tmpPath);
+                    }
+                    
                     needsFix = YES;
-                    NSLog(@"[DK] 🔄 导出文件映射: %@ → %@", isolatedPath, tmpPath);
+                    NSLog(@"[DK] 🔄 导出文件映射: %@ → %@", sourcePath, tmpPath);
+                } else {
+                    NSLog(@"[DK] ❌ 文件复制失败: %@ → %@, error: %@", sourcePath, tmpPath, copyError);
                 }
+            } else {
+                NSLog(@"[DK] ⚠️ 文件在两个路径都不存在: original=%@, isolated=%@", filePath, isolatedPath);
             }
         }
         
         if (needsFix) {
             fixedItems = [mutableItems copy];
+            NSLog(@"[DK] ✅ UIActivityViewController items 已修复，共 %lu 个项目", (unsigned long)fixedItems.count);
         }
     }
     

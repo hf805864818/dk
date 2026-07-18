@@ -33,6 +33,9 @@
 /// 返回处理后的 JSON 字典
 - (NSDictionary *)processResponseJSON:(NSDictionary *)originalJSON;
 
+/// 处理数组类型的 JSON 响应
+- (NSArray *)processResponseArray:(NSArray *)originalArray;
+
 /// 处理原始响应数据（NSData 级别）
 - (NSData *)processResponseData:(NSData *)originalData;
 

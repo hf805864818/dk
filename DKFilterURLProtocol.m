@@ -28,6 +28,13 @@ static NSString * const kDKFilterProtocolHandledKey = @"DKFilterProtocolHandled"
         return NO;
     }
     
+    // 跳过 WebSocket 升级请求（Upgrade: websocket）
+    NSDictionary *headers = request.allHTTPHeaderFields;
+    NSString *upgrade = headers[@"Upgrade"];
+    if (upgrade && [upgrade.lowercaseString containsString:@"websocket"]) {
+        return NO;
+    }
+    
     // 检查是否启用
     if (![DKContentFilterBypass sharedInstance].enabled) {
         return NO;
@@ -62,11 +69,10 @@ static NSString * const kDKFilterProtocolHandledKey = @"DKFilterProtocolHandled"
     NSMutableURLRequest *newRequest = [self.request mutableCopy];
     [NSURLProtocol setProperty:@YES forKey:kDKFilterProtocolHandledKey inRequest:newRequest];
     
-    // 使用 defaultSessionConfiguration（不继承原 session 的 delegate）
-    // 这样 PointCastle 不会 swizzle 我们的 internal delegate
-    NSURLSessionConfiguration *config = [NSURLSessionConfiguration defaultSessionConfiguration];
-    // 不继承原 session 的 protocolClasses，避免递归
-    config.protocolClasses = @[];
+    // 使用 ephemeralSessionConfiguration（不使用缓存，不存储 cookie）
+    // 不修改 protocolClasses，保持系统默认行为
+    // 我们通过 kDKFilterProtocolHandledKey 标记来避免递归
+    NSURLSessionConfiguration *config = [NSURLSessionConfiguration ephemeralSessionConfiguration];
     
     NSURLSession *session = [NSURLSession sessionWithConfiguration:config
                                                           delegate:self

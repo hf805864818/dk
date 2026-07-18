@@ -272,12 +272,181 @@ static NSUInteger _bypassCount = 0;
         result[@"messages"] = cleanMessages;
     }
     
+    // ============================================================
+    // 策略 6: 深度递归扫描（终极兜底）
+    //
+    // 以上策略都是基于已知结构的定点检查，
+    // 但 TRAE 可能有未知的嵌套结构（如 data.data.error_code）。
+    // 此策略递归遍历整个 JSON 树，在任何层级
+    // 发现错误码 983 都立即替换为 0。
+    //
+    // 注意：为了性能，只在前面的策略都没命中时才执行深度扫描。
+    // ============================================================
+    if (!modified) {
+        id deepResult = [self deepScanAndFix:result];
+        if (deepResult != result) {
+            modified = YES;
+            result = deepResult;
+        }
+    }
+    
     if (modified) {
         _statistics[@"total_bypass"] = @(_bypassCount);
         _statistics[@"last_bypass_time"] = [NSDate date];
     }
     
     return modified ? [result copy] : originalJSON;
+}
+
+#pragma mark - 深度递归扫描
+
+- (id)deepScanAndFix:(id)obj {
+    if (!obj) return obj;
+    
+    if ([obj isKindOfClass:[NSDictionary class]]) {
+        return [self deepScanDictionary:obj];
+    } else if ([obj isKindOfClass:[NSArray class]]) {
+        return [self deepScanArray:obj];
+    }
+    
+    return obj;
+}
+
+- (NSDictionary *)deepScanDictionary:(NSDictionary *)dict {
+    BOOL modified = NO;
+    NSMutableDictionary *result = [dict mutableCopy];
+    
+    for (NSString *key in dict.allKeys) {
+        id value = dict[key];
+        
+        // 检查当前 key 是否是错误码字段
+        BOOL isErrorKey = NO;
+        for (NSString *filteredKey in kFilteredJSONKeys) {
+            if ([key caseInsensitiveCompare:filteredKey] == NSOrderedSame) {
+                isErrorKey = YES;
+                break;
+            }
+        }
+        
+        if (isErrorKey) {
+            NSInteger errorCode = 0;
+            if ([value isKindOfClass:[NSNumber class]]) {
+                errorCode = [value integerValue];
+            } else if ([value isKindOfClass:[NSString class]]) {
+                errorCode = [value integerValue];
+            }
+            
+            if ([kFilteredErrorCodes containsObject:@(errorCode)]) {
+                result[key] = @0;
+                modified = YES;
+                _bypassCount++;
+                NSLog(@"[DK] 🔓 深度扫描拦截: %@=%ld → 0", key, (long)errorCode);
+            }
+        }
+        
+        // 递归处理值
+        id newValue = [self deepScanAndFix:value];
+        if (newValue != value) {
+            result[key] = newValue;
+            modified = YES;
+        }
+    }
+    
+    // 检查 error_message 中的敏感词提示
+    NSString *errorMessage = result[@"error_message"];
+    if (!errorMessage) errorMessage = result[@"errorMessage"];
+    if (!errorMessage) errorMessage = result[@"message"];
+    if (!errorMessage) errorMessage = result[@"msg"];
+    
+    if (errorMessage && [errorMessage isKindOfClass:[NSString class]]) {
+        if ([errorMessage containsString:@"敏感词"] ||
+            [errorMessage containsString:@"content_filter"] ||
+            [errorMessage containsString:@"983"]) {
+            // 移除错误消息并将 error_code 设为 0
+            [result removeObjectForKey:@"error_message"];
+            [result removeObjectForKey:@"errorMessage"];
+            [result removeObjectForKey:@"message"];
+            [result removeObjectForKey:@"msg"];
+            result[@"error_code"] = @0;
+            result[@"code"] = @0;
+            modified = YES;
+            _bypassCount++;
+            NSLog(@"[DK] 🔓 深度扫描拦截敏感词消息: %@", errorMessage);
+        }
+    }
+    
+    // 检查 finish_reason
+    NSString *finishReason = result[@"finish_reason"];
+    if (finishReason && [finishReason isKindOfClass:[NSString class]]) {
+        NSString *lower = [finishReason lowercaseString];
+        if ([lower isEqualToString:@"content_filter"] ||
+            [lower isEqualToString:@"sensitive"] ||
+            [lower isEqualToString:@"moderation"] ||
+            [lower isEqualToString:@"blocked"]) {
+            result[@"finish_reason"] = @"stop";
+            modified = YES;
+            _bypassCount++;
+            NSLog(@"[DK] 🔓 深度扫描拦截 finish_reason: %@", finishReason);
+        }
+    }
+    
+    // 检查 content_filter 相关字段
+    if (result[@"content_filter"] || result[@"contentFilter"]) {
+        [result removeObjectForKey:@"content_filter"];
+        [result removeObjectForKey:@"contentFilter"];
+        [result removeObjectForKey:@"filter_reason"];
+        [result removeObjectForKey:@"filterReason"];
+        [result removeObjectForKey:@"sensitive_words"];
+        [result removeObjectForKey:@"sensitiveWords"];
+        modified = YES;
+        _bypassCount++;
+        NSLog(@"[DK] 🔓 深度扫描移除 content_filter 标记");
+    }
+    
+    return modified ? [result copy] : dict;
+}
+
+- (NSArray *)deepScanArray:(NSArray *)arr {
+    BOOL modified = NO;
+    NSMutableArray *result = [arr mutableCopy];
+    
+    for (NSUInteger i = 0; i < result.count; i++) {
+        id item = result[i];
+        id newItem = [self deepScanAndFix:item];
+        if (newItem != item) {
+            result[i] = newItem;
+            modified = YES;
+        }
+    }
+    
+    return modified ? [result copy] : arr;
+}
+
+- (NSArray *)processResponseArray:(NSArray *)originalArray {
+    if (!_enabled) return originalArray;
+    if (!originalArray || ![originalArray isKindOfClass:[NSArray class]]) return originalArray;
+    
+    BOOL modified = NO;
+    NSMutableArray *result = [originalArray mutableCopy];
+    
+    for (NSUInteger i = 0; i < result.count; i++) {
+        id item = result[i];
+        if ([item isKindOfClass:[NSDictionary class]]) {
+            NSDictionary *filtered = [self processResponseJSON:item];
+            if (filtered != item) {
+                result[i] = filtered;
+                modified = YES;
+            }
+        } else if ([item isKindOfClass:[NSArray class]]) {
+            NSArray *filtered = [self processResponseArray:item];
+            if (filtered != item) {
+                result[i] = filtered;
+                modified = YES;
+            }
+        }
+    }
+    
+    return modified ? [result copy] : originalArray;
 }
 
 - (NSData *)processResponseData:(NSData *)originalData {
