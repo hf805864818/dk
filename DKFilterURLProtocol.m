@@ -29,7 +29,7 @@ static NSString * const kDKFilterProtocolHandledKey = @"DKFilterProtocolHandled"
     }
     
     // 检查是否启用
-    if (![DKContentFilterBypass sharedInstance].isEnabled) {
+    if (![DKContentFilterBypass sharedInstance].enabled) {
         return NO;
     }
     

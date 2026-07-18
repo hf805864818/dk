@@ -294,7 +294,6 @@ static NSUInteger _bypassCount = 0;
     NSString *text = [[NSString alloc] initWithData:originalData encoding:NSUTF8StringEncoding];
     if (text) {
         BOOL modified = NO;
-        NSMutableString *mutableText = [text mutableCopy];
         
         // 检测 SSE 格式: "data: {...}" 或 "data:{...}"
         // 对每个 data: 行单独解析和过滤
