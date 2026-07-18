@@ -640,13 +640,17 @@ didReceiveNotificationResponse:(UNNotificationResponse *)response
 %end
 
 // ============================================================
-// Hook 7: NSURLSession - 敏感词过滤绕过
-// 拦截网络响应数据，在 JSON 解析前替换错误码 983
-// 策略：包装 completionHandler，在原始回调前处理数据
+// Hook 7: NSURLSession - 敏感词过滤绕过（双层防护）
+//
+// Layer 1 (completionHandler): 拦截 dataTaskWithRequest:completionHandler:
+//   和 dataTaskWithURL:completionHandler: — 处理非流式 HTTP 请求
+// Layer 2 (delegate 代理): 拦截 NSURLSession 初始化，注入代理对象 —
+//   处理 SSE 流式响应，TRAE 的 AI 对话通过此路径传输
 // ============================================================
 
 %hook NSURLSession
 
+// Layer 1: completionHandler 路径（保留原有逻辑）
 - (NSURLSessionDataTask *)dataTaskWithRequest:(NSURLRequest *)request
                             completionHandler:(void (^)(NSData *data, NSURLResponse *response, NSError *error))completionHandler {
 
@@ -678,6 +682,25 @@ didReceiveNotificationResponse:(UNNotificationResponse *)response
 }
 
 %end
+
+// Layer 2: 代理注入 — 拦截所有 delegate-based NSURLSession（SSE 流式响应）
+// 使用 MSHookMessageEx 直接 hook 类方法，因为 %hook 无法 hook 类方法簇
+
+static id (*original_sessionWithConfig_delegate_queue)(Class, SEL, NSURLSessionConfiguration *, id, NSOperationQueue *);
+static id (*original_sessionWithConfig)(Class, SEL, NSURLSessionConfiguration *);
+
+static id hooked_sessionWithConfig_delegate_queue(Class cls, SEL sel, NSURLSessionConfiguration *config, id delegate, NSOperationQueue *queue) {
+    // 如果有 delegate，用代理包裹
+    if (delegate) {
+        DKFilterProxyDelegate *proxy = [[DKFilterProxyDelegate alloc] initWithOriginalDelegate:delegate];
+        return original_sessionWithConfig_delegate_queue(cls, sel, config, proxy, queue);
+    }
+    return original_sessionWithConfig_delegate_queue(cls, sel, config, delegate, queue);
+}
+
+static id hooked_sessionWithConfig(Class cls, SEL sel, NSURLSessionConfiguration *config) {
+    return original_sessionWithConfig(cls, sel, config);
+}
 
 // ============================================================
 // Hook 8: NSFileManager - 文件管理器路径重定向（关键！）
@@ -889,6 +912,26 @@ didReceiveNotificationResponse:(UNNotificationResponse *)response
         };
         rebind_symbols(rebindings, sizeof(rebindings) / sizeof(struct rebinding));
         NSLog(@"[DK] fishhook C 函数 Hook 已安装（24 个：Keychain 4 + CFPreferences 9 + POSIX 11）");
+
+        // ============================================
+        // 第 2.5 步：Hook NSURLSession 类方法 — 代理注入（SSE 流式响应）
+        // 必须在 fishhook 之后、_dkStartupGuard 关闭之前安装，
+        // 确保 App 创建第一个 NSURLSession 之前代理已就位。
+        // ============================================
+        {
+            Class sessionClass = objc_getClass("NSURLSession");
+            if (sessionClass) {
+                MSHookMessageEx(object_getClass(sessionClass),
+                                @selector(sessionWithConfiguration:delegate:delegateQueue:),
+                                (IMP)hooked_sessionWithConfig_delegate_queue,
+                                (IMP *)&original_sessionWithConfig_delegate_queue);
+                MSHookMessageEx(object_getClass(sessionClass),
+                                @selector(sessionWithConfiguration:),
+                                (IMP)hooked_sessionWithConfig,
+                                (IMP *)&original_sessionWithConfig);
+                NSLog(@"[DK] NSURLSession delegate 代理注入已安装（SSE 流式过滤）");
+            }
+        }
 
         // ============================================
         // 第三步：关闭启动保护

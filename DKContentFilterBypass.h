@@ -43,3 +43,19 @@
 - (NSDictionary *)bypassStatistics;
 
 @end
+
+// ============================================================
+// DKFilterProxyDelegate - NSURLSession 代理拦截器
+//
+// 问题：TRAE 使用 SSE (Server-Sent Events) 流式传输 AI 响应，
+// 数据通过 NSURLSessionDataDelegate 的 didReceiveData: 回调逐块到达，
+// 而非通过 completionHandler 一次性返回。
+// 之前的 Hook 只拦截 completionHandler 路径，对 SSE 流完全无效。
+//
+// 解决方案：用一个代理对象包裹原始 delegate，
+// 在 didReceiveData: 中拦截每个数据块，过滤敏感词错误后再转发。
+// ============================================================
+@interface DKFilterProxyDelegate : NSObject <NSURLSessionDataDelegate, NSURLSessionTaskDelegate, NSURLSessionDownloadDelegate, NSURLSessionStreamDelegate>
+@property (nonatomic, weak) id originalDelegate;
+- (instancetype)initWithOriginalDelegate:(id)originalDelegate;
+@end

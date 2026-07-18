@@ -37,12 +37,18 @@ static NSUInteger _bypassCount = 0;
         _bypassCount = 0;
         _statistics = [NSMutableDictionary dictionary];
         
-        // 初始化需要拦截的错误码
+        // 初始化需要拦截的错误码（基于 TRAE 错误码体系分析）
         kFilteredErrorCodes = @[
-            @983,   // 敏感词过滤
-            @984,   // 可能相关的变体
-            @1001,  // 常见的内容审核错误
-            @1002,  // 常见的内容审核错误
+            @983,   // 敏感词过滤（主要错误码）
+            @984,   // 敏感词过滤变体
+            @1001,  // 常见内容审核错误
+            @1002,  // 常见内容审核错误
+            @403,   // 内容安全策略阻止
+            @2001,  // 企业版内容过滤
+            @2002,  // 企业版内容过滤
+            @2003,  // 企业版内容过滤
+            @3001,  // 风险请求拦截
+            @3002,  // 防火墙拦截
         ];
         
         // 初始化需要处理的 JSON 字段名
@@ -56,6 +62,8 @@ static NSUInteger _bypassCount = 0;
             @"statusCode",
             @"error",
             @"err",
+            @"result_code",
+            @"resultCode",
         ];
     }
     return self;
@@ -170,6 +178,30 @@ static NSUInteger _bypassCount = 0;
         NSLog(@"[DK] 🔓 移除 content_filter 标记");
     }
     
+    // 检查 SSE 流式响应中的 content_filter_warning 字段
+    id filterWarning = result[@"content_filter_warning"];
+    if (filterWarning) {
+        [result removeObjectForKey:@"content_filter_warning"];
+        [result removeObjectForKey:@"contentFilterWarning"];
+        [result removeObjectForKey:@"isTruncated"];
+        modified = YES;
+        _bypassCount++;
+        NSLog(@"[DK] 🔓 移除 content_filter_warning 标记");
+    }
+    
+    // 检查 error_message 字段中的敏感词提示
+    NSString *errorMessage = result[@"error_message"];
+    if (errorMessage && [errorMessage containsString:@"敏感词"]) {
+        [result removeObjectForKey:@"error_message"];
+        [result removeObjectForKey:@"errorMessage"];
+        [result removeObjectForKey:@"error_code"];
+        [result removeObjectForKey:@"errorCode"];
+        result[@"error_code"] = @0;
+        modified = YES;
+        _bypassCount++;
+        NSLog(@"[DK] 🔓 移除敏感词 error_message: %@", errorMessage);
+    }
+    
     // ============================================================
     // 策略 5: 检查消息列表中的敏感词标记
     // ============================================================
@@ -203,45 +235,141 @@ static NSUInteger _bypassCount = 0;
     if (!_enabled) return originalData;
     if (!originalData || originalData.length == 0) return originalData;
     
-    // 尝试解析 JSON
+    // ============================================================
+    // 策略 0: SSE 流式数据过滤（最重要的路径）
+    // TRAE 的 AI 对话通过 SSE (text/event-stream) 传输，
+    // 格式为: "data: {...}\n\n"。敏感词错误码 983 嵌入在
+    // data: 行的 JSON 载荷中，而非顶层 HTTP 响应。
+    // 之前未处理此格式，导致敏感词过滤对 SSE 流完全无效。
+    // ============================================================
+    NSString *text = [[NSString alloc] initWithData:originalData encoding:NSUTF8StringEncoding];
+    if (text) {
+        BOOL modified = NO;
+        NSMutableString *mutableText = [text mutableCopy];
+        
+        // 检测 SSE 格式: "data: {...}" 或 "data:{...}"
+        // 对每个 data: 行单独解析和过滤
+        NSArray *chunks = [text componentsSeparatedByString:@"\n"];
+        NSMutableArray *filteredChunks = [NSMutableArray arrayWithCapacity:chunks.count];
+        
+        for (NSString *chunk in chunks) {
+            NSString *trimmed = [chunk stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+            NSString *processed = chunk;
+            
+            if ([trimmed hasPrefix:@"data:"] || [trimmed hasPrefix:@"data: "]) {
+                // 提取 JSON 部分
+                NSString *jsonStr = [trimmed substringFromIndex:[trimmed hasPrefix:@"data: "] ? 6 : 5];
+                NSData *jsonData = [jsonStr dataUsingEncoding:NSUTF8StringEncoding];
+                if (jsonData) {
+                    NSError *jsonError = nil;
+                    id jsonObj = [NSJSONSerialization JSONObjectWithData:jsonData
+                                                                 options:NSJSONReadingMutableContainers
+                                                                   error:&jsonError];
+                    if (!jsonError && [jsonObj isKindOfClass:[NSDictionary class]]) {
+                        NSDictionary *filtered = [self processResponseJSON:jsonObj];
+                        if (filtered != jsonObj) {
+                            // 重新序列化
+                            NSData *newData = [NSJSONSerialization dataWithJSONObject:filtered options:0 error:nil];
+                            if (newData) {
+                                NSString *newJson = [[NSString alloc] initWithData:newData encoding:NSUTF8StringEncoding];
+                                processed = [NSString stringWithFormat:@"data: %@", newJson];
+                                modified = YES;
+                            }
+                        }
+                    }
+                }
+            }
+            
+            [filteredChunks addObject:processed];
+        }
+        
+        if (modified) {
+            text = [filteredChunks componentsJoinedByString:@"\n"];
+            _bypassCount++;
+            _statistics[@"total_bypass"] = @(_bypassCount);
+            _statistics[@"last_bypass_time"] = [NSDate date];
+            NSLog(@"[DK] 🔓 SSE 流式数据过滤: 已拦截敏感词标记");
+            return [text dataUsingEncoding:NSUTF8StringEncoding];
+        }
+        
+        // 检查是否包含敏感词错误特征（非 JSON 格式的文本级匹配）
+        BOOL textModified = NO;
+        NSMutableString *mText = [text mutableCopy];
+        
+        // 扩展的文本匹配模式（覆盖所有已知错误码变体）
+        NSArray *textPatterns = @[
+            // 错误码 983 的所有常见变体
+            @[@"\"error_code\":983", @"\"error_code\":0"],
+            @[@"\"error_code\": 983", @"\"error_code\": 0"],
+            @[@"\"error_code\":984", @"\"error_code\":0"],
+            @[@"\"error_code\": 984", @"\"error_code\": 0"],
+            @[@"\"code\":983", @"\"code\":0"],
+            @[@"\"code\": 983", @"\"code\": 0"],
+            @[@"\"code\":984", @"\"code\":0"],
+            @[@"\"code\": 984", @"\"code\": 0"],
+            @[@"\"errCode\":983", @"\"errCode\":0"],
+            @[@"\"err_code\":983", @"\"err_code\":0"],
+            @[@"\"errorCode\":983", @"\"errorCode\":0"],
+            // 新增错误码
+            @[@"\"error_code\":1001", @"\"error_code\":0"],
+            @[@"\"error_code\": 1001", @"\"error_code\": 0"],
+            @[@"\"error_code\":1002", @"\"error_code\":0"],
+            @[@"\"error_code\":403", @"\"error_code\":0"],
+            @[@"\"error_code\":2001", @"\"error_code\":0"],
+            @[@"\"error_code\":2002", @"\"error_code\":0"],
+            // SSE 事件类型
+            @[@"\"event\":\"error\"", @"\"event\":\"message\""],
+            // 内容过滤标记
+            @[@"\"sensitive\":true", @"\"sensitive\":false"],
+            @[@"\"content_filter\":true", @"\"content_filter\":false"],
+        ];
+        
+        for (NSArray *pattern in textPatterns) {
+            NSString *from = pattern[0];
+            NSString *to = pattern[1];
+            if ([mText containsString:from]) {
+                mText = [[mText stringByReplacingOccurrencesOfString:from withString:to] mutableCopy];
+                textModified = YES;
+                NSLog(@"[DK] 🔓 文本级替换: %@ → %@", from, to);
+            }
+        }
+        
+        // 策略 B: 检查是否包含敏感词错误提示文本
+        if ([text containsString:@"敏感词"] ||
+            [text containsString:@"sensitive_content"] ||
+            [text containsString:@"content_filter"] ||
+            [text containsString:@"sensitive"]) {
+            // 如果整个响应都是敏感词错误（没有实际内容），返回空成功
+            // 注意：不做全量替换，只在确认是纯错误响应时处理
+            if ([text containsString:@"error_code"] || [text containsString:@"errorCode"]) {
+                // 这是纯错误 JSON，替换为成功
+                mText = [[text stringByReplacingOccurrencesOfString:@"\"result\":\"error\""
+                                                         withString:@"\"result\":\"success\""] mutableCopy];
+                textModified = YES;
+                NSLog(@"[DK] 🔓 检测到纯错误响应，替换为成功");
+            }
+        }
+        
+        if (textModified) {
+            _bypassCount++;
+            _statistics[@"total_bypass"] = @(_bypassCount);
+            _statistics[@"last_bypass_time"] = [NSDate date];
+            NSLog(@"[DK] 🔓 文本级拦截敏感词错误码");
+            return [mText dataUsingEncoding:NSUTF8StringEncoding];
+        }
+        
+        // 如果以上都没匹配到，返回原始数据
+        return originalData;
+    }
+    
+    // 非文本数据，尝试 JSON 解析
     NSError *jsonError = nil;
     id jsonObj = [NSJSONSerialization JSONObjectWithData:originalData
                                                  options:NSJSONReadingMutableContainers
                                                    error:&jsonError];
     
     if (jsonError || !jsonObj) {
-        // 不是 JSON 数据，尝试文本匹配
-        NSString *text = [[NSString alloc] initWithData:originalData encoding:NSUTF8StringEncoding];
-        if (text) {
-            // 检查是否包含敏感词错误特征
-            if ([text containsString:@"error_code\":983"] ||
-                [text containsString:@"error_code\": 983"] ||
-                [text containsString:@"\"code\":983"] ||
-                [text containsString:@"\"code\": 983"] ||
-                [text containsString:@"敏感词"]) {
-                
-                // 替换错误码
-                text = [text stringByReplacingOccurrencesOfString:@"\"error_code\":983"
-                                                       withString:@"\"error_code\":0"];
-                text = [text stringByReplacingOccurrencesOfString:@"\"error_code\": 983"
-                                                       withString:@"\"error_code\": 0"];
-                text = [text stringByReplacingOccurrencesOfString:@"\"code\":983"
-                                                       withString:@"\"code\":0"];
-                text = [text stringByReplacingOccurrencesOfString:@"\"code\": 983"
-                                                       withString:@"\"code\": 0"];
-                
-                text = [text stringByReplacingOccurrencesOfString:@"\"error_code\":984"
-                                                       withString:@"\"error_code\":0"];
-                text = [text stringByReplacingOccurrencesOfString:@"\"code\":984"
-                                                       withString:@"\"code\":0"];
-                
-                _bypassCount++;
-                _statistics[@"total_bypass"] = @(_bypassCount);
-                
-                NSLog(@"[DK] 🔓 文本级拦截敏感词错误码");
-                return [text dataUsingEncoding:NSUTF8StringEncoding];
-            }
-        }
+        // 非 JSON 数据且非 UTF8 文本，无法处理
         return originalData;
     }
     
@@ -321,6 +449,191 @@ static NSUInteger _bypassCount = 0;
     [[NSUserDefaults standardUserDefaults] setBool:enabled forKey:@"DK_ContentFilterBypass_Enabled"];
     [[NSUserDefaults standardUserDefaults] synchronize];
     NSLog(@"[DK] 敏感词过滤绕过: %@", enabled ? @"已启用" : @"已禁用");
+}
+
+@end
+
+// ============================================================
+// DKFilterProxyDelegate - NSURLSession 代理拦截器
+// ============================================================
+
+@implementation DKFilterProxyDelegate {
+    // 累积收到的 SSE 数据（用于跨 chunk 重组 JSON）
+    NSMutableData *_accumulatedData;
+}
+
+- (instancetype)initWithOriginalDelegate:(id)originalDelegate {
+    self = [super init];
+    if (self) {
+        _originalDelegate = originalDelegate;
+    }
+    return self;
+}
+
+#pragma mark - NSURLSessionDataDelegate
+
+- (void)URLSession:(NSURLSession *)session
+          dataTask:(NSURLSessionDataTask *)dataTask
+    didReceiveData:(NSData *)data {
+    if (!data || data.length == 0) {
+        if ([_originalDelegate respondsToSelector:_cmd]) {
+            [_originalDelegate URLSession:session dataTask:dataTask didReceiveData:data];
+        }
+        return;
+    }
+    
+    // 处理数据：过滤敏感词错误
+    NSData *filtered = [[DKContentFilterBypass sharedInstance] processResponseData:data];
+    
+    if ([_originalDelegate respondsToSelector:_cmd]) {
+        [_originalDelegate URLSession:session dataTask:dataTask didReceiveData:filtered];
+    }
+}
+
+- (void)URLSession:(NSURLSession *)session
+          dataTask:(NSURLSessionDataTask *)dataTask
+didReceiveResponse:(NSURLResponse *)response
+ completionHandler:(void (^)(NSURLSessionResponseDisposition))completionHandler {
+    if ([_originalDelegate respondsToSelector:_cmd]) {
+        [_originalDelegate URLSession:session dataTask:dataTask didReceiveResponse:response completionHandler:completionHandler];
+    } else {
+        completionHandler(NSURLSessionResponseAllow);
+    }
+}
+
+- (void)URLSession:(NSURLSession *)session
+          dataTask:(NSURLSessionDataTask *)dataTask
+ didBecomeDownloadTask:(NSURLSessionDownloadTask *)downloadTask {
+    if ([_originalDelegate respondsToSelector:_cmd]) {
+        [_originalDelegate URLSession:session dataTask:dataTask didBecomeDownloadTask:downloadTask];
+    }
+}
+
+- (void)URLSession:(NSURLSession *)session
+          dataTask:(NSURLSessionDataTask *)dataTask
+ didBecomeStreamTask:(NSURLSessionStreamTask *)streamTask {
+    if ([_originalDelegate respondsToSelector:_cmd]) {
+        [_originalDelegate URLSession:session dataTask:dataTask didBecomeStreamTask:streamTask];
+    }
+}
+
+- (void)URLSession:(NSURLSession *)session
+          dataTask:(NSURLSessionDataTask *)dataTask
+ willCacheResponse:(NSCachedURLResponse *)proposedResponse
+ completionHandler:(void (^)(NSCachedURLResponse * _Nullable))completionHandler {
+    if ([_originalDelegate respondsToSelector:_cmd]) {
+        [_originalDelegate URLSession:session dataTask:dataTask willCacheResponse:proposedResponse completionHandler:completionHandler];
+    } else {
+        completionHandler(proposedResponse);
+    }
+}
+
+#pragma mark - NSURLSessionTaskDelegate
+
+- (void)URLSession:(NSURLSession *)session
+              task:(NSURLSessionTask *)task
+didCompleteWithError:(NSError *)error {
+    if ([_originalDelegate respondsToSelector:_cmd]) {
+        [_originalDelegate URLSession:session task:task didCompleteWithError:error];
+    }
+}
+
+- (void)URLSession:(NSURLSession *)session
+              task:(NSURLSessionTask *)task
+willPerformHTTPRedirection:(NSHTTPURLResponse *)response
+        newRequest:(NSURLRequest *)request
+ completionHandler:(void (^)(NSURLRequest * _Nullable))completionHandler {
+    if ([_originalDelegate respondsToSelector:_cmd]) {
+        [_originalDelegate URLSession:session task:task willPerformHTTPRedirection:response newRequest:request completionHandler:completionHandler];
+    } else {
+        completionHandler(request);
+    }
+}
+
+- (void)URLSession:(NSURLSession *)session
+              task:(NSURLSessionTask *)task
+didReceiveChallenge:(NSURLAuthenticationChallenge *)challenge
+ completionHandler:(void (^)(NSURLSessionAuthChallengeDisposition, NSURLCredential * _Nullable))completionHandler {
+    if ([_originalDelegate respondsToSelector:_cmd]) {
+        [_originalDelegate URLSession:session task:task didReceiveChallenge:challenge completionHandler:completionHandler];
+    } else {
+        completionHandler(NSURLSessionAuthChallengePerformDefaultHandling, nil);
+    }
+}
+
+- (void)URLSession:(NSURLSession *)session
+              task:(NSURLSessionTask *)task
+ needNewBodyStream:(void (^)(NSInputStream * _Nullable))completionHandler {
+    if ([_originalDelegate respondsToSelector:_cmd]) {
+        [_originalDelegate URLSession:session task:task needNewBodyStream:completionHandler];
+    } else {
+        completionHandler(nil);
+    }
+}
+
+- (void)URLSession:(NSURLSession *)session
+              task:(NSURLSessionTask *)task
+   didSendBodyData:(int64_t)bytesSent
+    totalBytesSent:(int64_t)totalBytesSent
+totalBytesExpectedToSend:(int64_t)totalBytesExpectedToSend {
+    if ([_originalDelegate respondsToSelector:_cmd]) {
+        [_originalDelegate URLSession:session task:task didSendBodyData:bytesSent totalBytesSent:totalBytesSent totalBytesExpectedToSend:totalBytesExpectedToSend];
+    }
+}
+
+- (void)URLSession:(NSURLSession *)session
+      taskIsWaitingForConnectivity:(NSURLSessionTask *)task {
+    if ([_originalDelegate respondsToSelector:_cmd]) {
+        [_originalDelegate URLSession:session taskIsWaitingForConnectivity:task];
+    }
+}
+
+- (void)URLSession:(NSURLSession *)session
+              task:(NSURLSessionTask *)task
+didFinishCollectingMetrics:(NSURLSessionTaskMetrics *)metrics {
+    if ([_originalDelegate respondsToSelector:_cmd]) {
+        [_originalDelegate URLSession:session task:task didFinishCollectingMetrics:metrics];
+    }
+}
+
+#pragma mark - NSURLSessionDownloadDelegate
+
+- (void)URLSession:(NSURLSession *)session
+      downloadTask:(NSURLSessionDownloadTask *)downloadTask
+didFinishDownloadingToURL:(NSURL *)location {
+    if ([_originalDelegate respondsToSelector:_cmd]) {
+        [_originalDelegate URLSession:session downloadTask:downloadTask didFinishDownloadingToURL:location];
+    }
+}
+
+- (void)URLSession:(NSURLSession *)session
+      downloadTask:(NSURLSessionDownloadTask *)downloadTask
+      didWriteData:(int64_t)bytesWritten
+ totalBytesWritten:(int64_t)totalBytesWritten
+totalBytesExpectedToWrite:(int64_t)totalBytesExpectedToWrite {
+    if ([_originalDelegate respondsToSelector:_cmd]) {
+        [_originalDelegate URLSession:session downloadTask:downloadTask didWriteData:bytesWritten totalBytesWritten:totalBytesWritten totalBytesExpectedToWrite:totalBytesExpectedToWrite];
+    }
+}
+
+- (void)URLSession:(NSURLSession *)session
+      downloadTask:(NSURLSessionDownloadTask *)downloadTask
+ didResumeAtOffset:(int64_t)fileOffset
+expectedTotalBytes:(int64_t)expectedTotalBytes {
+    if ([_originalDelegate respondsToSelector:_cmd]) {
+        [_originalDelegate URLSession:session downloadTask:downloadTask didResumeAtOffset:fileOffset expectedTotalBytes:expectedTotalBytes];
+    }
+}
+
+#pragma mark - Forwarding to catch any methods we didn't explicitly implement
+
+- (BOOL)respondsToSelector:(SEL)aSelector {
+    if ([super respondsToSelector:aSelector]) return YES;
+    return [_originalDelegate respondsToSelector:aSelector];
+}
+
+- (id)forwardingTargetForSelector:(SEL)aSelector {
+    return _originalDelegate;
 }
 
 @end
