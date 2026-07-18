@@ -369,15 +369,31 @@ static NSString *_accountsRootPath = nil;
     NSString *newPath = [rootPath stringByAppendingPathComponent:newName];
     
     // 重命名目录
+    BOOL renamed = NO;
     if ([fm fileExistsAtPath:oldPath]) {
-        if (rename([oldPath fileSystemRepresentation], [newPath fileSystemRepresentation]) != 0) {
+        if (rename([oldPath fileSystemRepresentation], [newPath fileSystemRepresentation]) == 0) {
+            renamed = YES;
+        } else {
             // rename 失败，尝试 copy + delete
-            if (![fm copyItemAtPath:oldPath toPath:newPath error:nil]) {
-                NSLog(@"[DK] 重命名目录失败: %@ → %@", oldName, newName);
-                return NO;
+            if ([fm copyItemAtPath:oldPath toPath:newPath error:nil]) {
+                [fm removeItemAtPath:oldPath error:nil];
+                renamed = YES;
             }
-            [fm removeItemAtPath:oldPath error:nil];
         }
+    } else {
+        // 旧目录不存在（可能已被重命名），直接视为成功
+        renamed = YES;
+    }
+    
+    // 清理残留：如果旧目录仍然存在（例如之前 bug 导致的重命名未生效），强制删除
+    if ([fm fileExistsAtPath:oldPath]) {
+        NSLog(@"[DK] 检测到旧目录残留，强制删除: %@", oldPath);
+        [fm removeItemAtPath:oldPath error:nil];
+    }
+    
+    if (!renamed && ![fm fileExistsAtPath:newPath]) {
+        NSLog(@"[DK] 重命名目录失败: %@ → %@", oldName, newName);
+        return NO;
     }
     
     // 更新元数据
