@@ -141,9 +141,12 @@ willPerformHTTPRedirection:(NSHTTPURLResponse *)response
               task:(NSURLSessionTask *)task
 didReceiveChallenge:(NSURLAuthenticationChallenge *)challenge
  completionHandler:(void (^)(NSURLSessionAuthChallengeDisposition, NSURLCredential * _Nullable))completionHandler {
-    // 透传认证挑战
-    [self.client URLProtocol:self didReceiveAuthenticationChallenge:challenge];
-    completionHandler(NSURLSessionAuthChallengePerformDefaultHandling, nil);
+    // 转发认证挑战给原始 client
+    [[self client] URLProtocol:self didReceiveAuthenticationChallenge:challenge];
+    // 关键：使用 CancelAuthenticationChallenge 而不是 PerformDefaultHandling
+    // PerformDefaultHandling 会触发 performDefaultHandlingForAuthenticationChallenge:
+    // 该 selector 在 __NSCFURLLocalSessionConnection 上不存在，导致 SIGABRT 崩溃
+    completionHandler(NSURLSessionAuthChallengeCancelAuthenticationChallenge, nil);
 }
 
 @end
