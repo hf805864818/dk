@@ -33,7 +33,10 @@
 /// 过滤包含关键词的日志
 - (NSArray<NSString *> *)logsContaining:(NSString *)keyword;
 
-/// 导出日志到文件
+/// 导出全部日志为单个 txt 文件
 - (NSString *)exportLogsToFile;
+
+/// 导出全部日志为 zip 压缩包（包含日志文件 + 导出信息）
+- (NSString *)exportLogsToZip;
 
 @end

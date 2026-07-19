@@ -141,12 +141,187 @@ static void (*original_NSLogv)(NSString *format, va_list args);
 
 - (NSString *)exportLogsToFile {
     NSArray *logs = [self allLogs];
-    NSString *content = [logs componentsJoinedByString:@"\n"];
+    
+    // 构建导出内容：头部信息 + 全部日志
+    NSDateFormatter *df = [[NSDateFormatter alloc] init];
+    df.dateFormat = @"yyyy-MM-dd HH:mm:ss";
+    NSString *dateStr = [df stringFromDate:[NSDate date]];
+    
+    NSMutableString *content = [NSMutableString string];
+    [content appendFormat:@"DK 多开插件 - 日志导出\n"];
+    [content appendFormat:@"导出时间: %@\n", dateStr];
+    [content appendFormat:@"日志总数: %lu 条\n", (unsigned long)logs.count];
+    [content appendString:@"========================================================\n\n"];
+    
+    for (NSString *log in logs) {
+        [content appendFormat:@"%@\n", log];
+    }
     
     NSString *tmpPath = [NSTemporaryDirectory() stringByAppendingPathComponent:
                          [NSString stringWithFormat:@"dk_logs_%.0f.txt", [[NSDate date] timeIntervalSince1970]]];
     [content writeToFile:tmpPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
     return tmpPath;
+}
+
+- (NSString *)exportLogsToZip {
+    // 先生成 txt 文件
+    NSString *txtPath = [self exportLogsToFile];
+    if (!txtPath) return nil;
+    
+    NSString *txtName = [txtPath lastPathComponent];
+    NSData *txtData = [NSData dataWithContentsOfFile:txtPath];
+    if (!txtData) return nil;
+    
+    // 手动构建 zip 文件（store 模式，无压缩）
+    NSMutableData *zipData = [NSMutableData data];
+    
+    // 使用系统时间作为 zip 内部时间戳
+    NSDate *now = [NSDate date];
+    NSCalendar *cal = [NSCalendar currentCalendar];
+    NSDateComponents *comp = [cal components:(NSCalendarUnitYear | NSCalendarUnitMonth | NSCalendarUnitDay |
+                                                NSCalendarUnitHour | NSCalendarUnitMinute | NSCalendarUnitSecond)
+                                     fromDate:now];
+    uint16_t dosTime = (uint16_t)((comp.second / 2) | (comp.minute << 5) | (comp.hour << 11));
+    uint16_t dosDate = (uint16_t)(comp.day | (comp.month << 5) | ((comp.year - 1980) << 9));
+    
+    uint32_t crc = (uint32_t)[self _crc32ForData:txtData];
+    uint32_t fileSize = (uint32_t)txtData.length;
+    const char *fileName = [txtName UTF8String];
+    uint16_t fileNameLen = (uint16_t)strlen(fileName);
+    
+    // ---- Local File Header ----
+    // signature (4): 0x04034b50
+    // version needed (2): 20
+    // flags (2): 0
+    // compression (2): 0 (store)
+    // mod time (2)
+    // mod date (2)
+    // crc32 (4)
+    // compressed size (4)
+    // uncompressed size (4)
+    // filename length (2)
+    // extra field length (2): 0
+    uint32_t sig = 0x04034b50;
+    [zipData appendBytes:&sig length:4];
+    uint16_t ver = 20;
+    [zipData appendBytes:&ver length:2];
+    uint16_t flags = 0;
+    [zipData appendBytes:&flags length:2];
+    uint16_t method = 0;
+    [zipData appendBytes:&method length:2];
+    [zipData appendBytes:&dosTime length:2];
+    [zipData appendBytes:&dosDate length:2];
+    [zipData appendBytes:&crc length:4];
+    [zipData appendBytes:&fileSize length:4];
+    [zipData appendBytes:&fileSize length:4];
+    [zipData appendBytes:&fileNameLen length:2];
+    uint16_t extraLen = 0;
+    [zipData appendBytes:&extraLen length:2];
+    [zipData appendBytes:fileName length:fileNameLen];
+    
+    // ---- File Data ----
+    [zipData appendData:txtData];
+    
+    // ---- Central Directory Entry ----
+    // signature (4): 0x02014b50
+    // version made by (2): 20
+    // version needed (2): 20
+    // flags (2): 0
+    // compression (2): 0
+    // mod time (2)
+    // mod date (2)
+    // crc32 (4)
+    // compressed size (4)
+    // uncompressed size (4)
+    // filename length (2)
+    // extra field length (2): 0
+    // comment length (2): 0
+    // disk # start (2): 0
+    // internal attrs (2): 0
+    // external attrs (4): 0
+    // local header offset (4)
+    uint32_t localHeaderOffset = 0;
+    uint32_t cdSig = 0x02014b50;
+    [zipData appendBytes:&cdSig length:4];
+    uint16_t verMade = 20;
+    [zipData appendBytes:&verMade length:2];
+    [zipData appendBytes:&ver length:2];
+    [zipData appendBytes:&flags length:2];
+    [zipData appendBytes:&method length:2];
+    [zipData appendBytes:&dosTime length:2];
+    [zipData appendBytes:&dosDate length:2];
+    [zipData appendBytes:&crc length:4];
+    [zipData appendBytes:&fileSize length:4];
+    [zipData appendBytes:&fileSize length:4];
+    [zipData appendBytes:&fileNameLen length:2];
+    [zipData appendBytes:&extraLen length:2];
+    uint16_t commentLen = 0;
+    [zipData appendBytes:&commentLen length:2];
+    uint16_t diskStart = 0;
+    [zipData appendBytes:&diskStart length:2];
+    uint16_t internalAttrs = 0;
+    [zipData appendBytes:&internalAttrs length:2];
+    uint32_t externalAttrs = 0;
+    [zipData appendBytes:&externalAttrs length:4];
+    [zipData appendBytes:&localHeaderOffset length:4];
+    [zipData appendBytes:fileName length:fileNameLen];
+    
+    // ---- End of Central Directory Record ----
+    // signature (4): 0x06054b50
+    // disk # (2): 0
+    // disk with CD (2): 0
+    // entries on this disk (2): 1
+    // total entries (2): 1
+    // CD size (4)
+    // CD offset (4)
+    // comment length (2): 0
+    uint32_t cdSize = (uint32_t)(46 + fileNameLen);
+    uint32_t cdOffset = (uint32_t)(30 + fileNameLen + fileSize);
+    uint32_t eocdSig = 0x06054b50;
+    [zipData appendBytes:&eocdSig length:4];
+    uint16_t diskNum = 0;
+    [zipData appendBytes:&diskNum length:2];
+    [zipData appendBytes:&diskNum length:2];
+    uint16_t entryCount = 1;
+    [zipData appendBytes:&entryCount length:2];
+    [zipData appendBytes:&entryCount length:2];
+    [zipData appendBytes:&cdSize length:4];
+    [zipData appendBytes:&cdOffset length:4];
+    [zipData appendBytes:&commentLen length:2];
+    
+    // 写入 zip 文件
+    NSString *zipName = [txtName stringByReplacingOccurrencesOfString:@".txt" withString:@".zip"];
+    NSString *zipPath = [NSTemporaryDirectory() stringByAppendingPathComponent:zipName];
+    [zipData writeToFile:zipPath atomically:YES];
+    
+    // 清理临时 txt 文件
+    [[NSFileManager defaultManager] removeItemAtPath:txtPath error:nil];
+    
+    return zipPath;
+}
+
+#pragma mark - CRC32 计算
+
+- (uint32_t)_crc32ForData:(NSData *)data {
+    static uint32_t crcTable[256];
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        for (uint32_t i = 0; i < 256; i++) {
+            uint32_t crc = i;
+            for (int j = 0; j < 8; j++) {
+                crc = (crc >> 1) ^ ((crc & 1) ? 0xEDB88320 : 0);
+            }
+            crcTable[i] = crc;
+        }
+    });
+    
+    uint32_t crc = 0xFFFFFFFF;
+    const uint8_t *bytes = data.bytes;
+    NSUInteger length = data.length;
+    for (NSUInteger i = 0; i < length; i++) {
+        crc = (crc >> 8) ^ crcTable[(crc ^ bytes[i]) & 0xFF];
+    }
+    return crc ^ 0xFFFFFFFF;
 }
 
 @end

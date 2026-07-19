@@ -933,8 +933,8 @@ static char kDKLogViewerKey;
 }
 
 - (void)_exportLogs {
-    // 导出日志到文件，然后用系统分享面板分享
-    NSString *filePath = [[DKLogManager sharedInstance] exportLogsToFile];
+    // 导出全部日志为 zip 压缩包，然后用系统分享面板分享
+    NSString *filePath = [[DKLogManager sharedInstance] exportLogsToZip];
     if (!filePath) {
         [self _showToast:@"导出失败"];
         return;
