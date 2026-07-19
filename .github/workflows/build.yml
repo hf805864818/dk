@@ -221,7 +221,15 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add VERSION control CHANGELOG.md
           git commit -m "chore: bump version to ${{ steps.bump.outputs.new_version }} [skip ci]" || echo "No changes"
-          git tag "v${{ steps.bump.outputs.new_version }}"
+          
+          # 如果 tag 已存在（上一次构建残留），先删除再创建
+          TAG="v${{ steps.bump.outputs.new_version }}"
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists, deleting..."
+            git tag -d "$TAG"
+            git push origin ":refs/tags/$TAG" || true
+          fi
+          git tag "$TAG"
 
       - name: Push Changes
         run: git push origin main --tags
