@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.0.77] - 2026-07-19
+
+- 59e1470 fix: 彻底禁用 DKFilterURLProtocol 解决闪退
+
+
 ## [1.0.76] - 2026-07-19
 
 - 22ddfe2 fix: 彻底修复认证挑战闪退，不再转发挑战给 client
