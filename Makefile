@@ -37,6 +37,7 @@ dk_FILES = Tweak.x \
            DKPushNotificationBridge.m \
            DKContentFilterBypass.m \
            DKFilterURLProtocol.m \
+           DKLogManager.m \
            fishhook/fishhook.c
 
 # 编译选项 — 版本号作为预处理器宏注入

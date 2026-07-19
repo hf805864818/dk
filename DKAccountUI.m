@@ -2,6 +2,7 @@
 #import "DKAccountManager.h"
 #import "DKPushNotificationBridge.h"
 #import "DKContentFilterBypass.h"
+#import "DKLogManager.h"
 #import <objc/runtime.h>
 #import <AudioToolbox/AudioToolbox.h>
 
@@ -31,6 +32,7 @@ static char kDKFloatingButtonKey;
 static char kDKMenuViewKey;
 static char kDKGestureKey;
 static char kDKHiddenIndicatorKey;
+static char kDKLogViewerKey;
 
 @interface DKAccountUI ()
 @property (nonatomic, weak) UIWindow *targetWindow;
@@ -499,6 +501,7 @@ static char kDKHiddenIndicatorKey;
         [menuItems addObject:filterLabel];
 
         [menuItems addObject:@"🧹 清理多开数据"];
+        [menuItems addObject:@"📋 查看日志"];
         [menuItems addObject:[NSString stringWithFormat:@"ℹ️ 当前版本 v%@", DKGetVersion() ?: @"unknown"]];
         [menuItems addObject:@"👁 隐藏图标"];
         
@@ -548,8 +551,9 @@ static char kDKHiddenIndicatorKey;
             NSString *item = menuItems[i];
             BOOL isAddAccount = (i == 0);
             BOOL isDefaultAccount = (i == 1);
-            BOOL isFilterToggle = (i == rowCount - 4);
-            BOOL isClearData = (i == rowCount - 3);
+            BOOL isFilterToggle = (i == rowCount - 5);
+            BOOL isClearData = (i == rowCount - 4);
+            BOOL isLogViewer = (i == rowCount - 3);
             BOOL isVersionInfo = (i == rowCount - 2);
             BOOL isHideOption = (i == rowCount - 1);
             BOOL isCurrentAccount = [item isEqualToString:currentAccount] ||
@@ -570,6 +574,7 @@ static char kDKHiddenIndicatorKey;
                               isVersionInfo ? [UIColor colorWithWhite:0.75 alpha:1.0] :
                               isClearData ? [UIColor colorWithRed:1.0 green:0.35 blue:0.25 alpha:1.0] :
                               isFilterToggle ? [UIColor colorWithRed:1.0 green:0.75 blue:0.3 alpha:1.0] :
+                              isLogViewer ? [UIColor colorWithRed:0.3 green:0.9 blue:0.5 alpha:1.0] :
                               [UIColor whiteColor];
             label.font = [UIFont systemFontOfSize:15];
             
@@ -581,14 +586,14 @@ static char kDKHiddenIndicatorKey;
                 label.font = [UIFont systemFontOfSize:13];
             }
 
-            if (isCurrentAccount && !isAddAccount && !isHideOption && !isFilterToggle && !isClearData && !isVersionInfo) {
+            if (isCurrentAccount && !isAddAccount && !isHideOption && !isFilterToggle && !isClearData && !isVersionInfo && !isLogViewer) {
                 label.text = [NSString stringWithFormat:@"✓ %@", item];
                 label.textColor = [UIColor colorWithRed:0.3 green:0.9 blue:0.5 alpha:1.0];
             }
 
             [rowView addSubview:label];
             
-            if (!isAddAccount && !isHideOption && !isFilterToggle && !isClearData && !isVersionInfo) {
+            if (!isAddAccount && !isHideOption && !isFilterToggle && !isClearData && !isVersionInfo && !isLogViewer) {
                 NSInteger unread = [[DKPushNotificationBridge sharedInstance] unreadCountForAccount:item];
                 if (unread > 0) {
                     UILabel *badge = [[UILabel alloc] initWithFrame:CGRectMake(kMenuWidth - 42, 12, 24, 24)];
@@ -609,7 +614,7 @@ static char kDKHiddenIndicatorKey;
                                             action:@selector(_handleMenuItemTap:)];
             [rowView addGestureRecognizer:tap];
             
-            if (!isAddAccount && !isHideOption && !isFilterToggle && !isClearData && !isVersionInfo) {
+            if (!isAddAccount && !isHideOption && !isFilterToggle && !isClearData && !isVersionInfo && !isLogViewer) {
                 UILongPressGestureRecognizer *longPress = [[UILongPressGestureRecognizer alloc]
                                                             initWithTarget:self
                                                             action:@selector(_handleMenuItemLongPress:)];
@@ -678,9 +683,8 @@ static char kDKHiddenIndicatorKey;
     [self hideAccountMenu];
     
     NSArray *accounts = [[DKAccountManager sharedManager] allAccountNames];
-    // 0: add, 1: default, 2..N+1: accounts, N+2: filter, N+3: clear data, N+4: version, N+5: hide
-    NSInteger defaultAccountOffset = 1; // 默认账号在菜单中的偏移
-    NSInteger totalItems = 1 + defaultAccountOffset + accounts.count + 4;
+    // 0: add, 1: default, 2..N+1: accounts, N+2: filter, N+3: clear, N+4: logs, N+5: version, N+6: hide
+    NSInteger totalItems = 1 + 1 + accounts.count + 5;
     
     if (index == 0) {
         [self _promptAddAccount];
@@ -694,8 +698,10 @@ static char kDKHiddenIndicatorKey;
     } else if (index == totalItems - 2) {
         [self _showToast:[NSString stringWithFormat:@"当前版本 v%@", DKGetVersion() ?: @"unknown"]];
     } else if (index == totalItems - 3) {
-        [self _promptClearMultiAccountData];
+        [self _showLogViewer];
     } else if (index == totalItems - 4) {
+        [self _promptClearMultiAccountData];
+    } else if (index == totalItems - 5) {
         [self _toggleContentFilter];
     } else {
         NSInteger accountIndex = index - 2;
@@ -759,6 +765,235 @@ static char kDKHiddenIndicatorKey;
     [self _showToast:[NSString stringWithFormat:@"敏感词过滤绕过 %@", status]];
     
     NSLog(@"[DK] 敏感词过滤绕过: %@", bypass.enabled ? @"ON" : @"OFF");
+}
+
+#pragma mark - 日志查看器
+
+- (void)_showLogViewer {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIWindow *keyWindow = [self _keyWindow];
+        if (!keyWindow) return;
+        
+        // 移除旧日志查看器
+        UIView *oldViewer = objc_getAssociatedObject(keyWindow, &kDKLogViewerKey);
+        if (oldViewer) {
+            [oldViewer removeFromSuperview];
+        }
+        
+        NSArray *allLogs = [[DKLogManager sharedInstance] allLogs];
+        NSUInteger logCount = [[DKLogManager sharedInstance] logCount];
+        
+        CGFloat screenWidth = keyWindow.bounds.size.width;
+        CGFloat screenHeight = keyWindow.bounds.size.height;
+        CGFloat safeTop = keyWindow.safeAreaInsets.top;
+        CGFloat safeBottom = keyWindow.safeAreaInsets.bottom;
+        
+        // 背景遮罩
+        UIView *container = [[UIView alloc] initWithFrame:keyWindow.bounds];
+        container.backgroundColor = [UIColor colorWithWhite:0 alpha:0.5];
+        container.tag = 9999;
+        
+        UITapGestureRecognizer *bgTap = [[UITapGestureRecognizer alloc]
+                                          initWithTarget:self action:@selector(_hideLogViewer)];
+        bgTap.cancelsTouchesInView = NO;
+        [container addGestureRecognizer:bgTap];
+        
+        // 日志面板
+        CGFloat panelY = safeTop + 60;
+        CGFloat panelHeight = screenHeight - safeTop - safeBottom - 100;
+        UIView *panel = [[UIView alloc] initWithFrame:CGRectMake(10, panelY, screenWidth - 20, panelHeight)];
+        panel.backgroundColor = [UIColor colorWithWhite:0.08 alpha:0.98];
+        panel.layer.cornerRadius = 14;
+        panel.clipsToBounds = YES;
+        [container addSubview:panel];
+        
+        // 标题栏
+        UIView *titleBar = [[UIView alloc] initWithFrame:CGRectMake(0, 0, panel.bounds.size.width, 44)];
+        titleBar.backgroundColor = [UIColor colorWithWhite:0.12 alpha:1.0];
+        [panel addSubview:titleBar];
+        
+        // 标题
+        UILabel *titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(16, 0, 150, 44)];
+        titleLabel.text = [NSString stringWithFormat:@"📋 日志 (%lu条)", (unsigned long)logCount];
+        titleLabel.textColor = [UIColor whiteColor];
+        titleLabel.font = [UIFont boldSystemFontOfSize:16];
+        [titleBar addSubview:titleLabel];
+        
+        // 清空按钮
+        UIButton *clearBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+        clearBtn.frame = CGRectMake(panel.bounds.size.width - 120, 0, 55, 44);
+        [clearBtn setTitle:@"清空" forState:UIControlStateNormal];
+        [clearBtn setTitleColor:[UIColor colorWithRed:1.0 green:0.35 blue:0.25 alpha:1.0] forState:UIControlStateNormal];
+        clearBtn.titleLabel.font = [UIFont systemFontOfSize:14];
+        [clearBtn addTarget:self action:@selector(_clearLogsAndRefresh) forControlEvents:UIControlEventTouchUpInside];
+        [titleBar addSubview:clearBtn];
+        
+        // 关闭按钮
+        UIButton *closeBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+        closeBtn.frame = CGRectMake(panel.bounds.size.width - 55, 0, 50, 44);
+        [closeBtn setTitle:@"✕" forState:UIControlStateNormal];
+        [closeBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+        closeBtn.titleLabel.font = [UIFont boldSystemFontOfSize:20];
+        [closeBtn addTarget:self action:@selector(_hideLogViewer) forControlEvents:UIControlEventTouchUpInside];
+        [titleBar addSubview:closeBtn];
+        
+        // 过滤器标签栏
+        UIView *filterBar = [[UIView alloc] initWithFrame:CGRectMake(0, 44, panel.bounds.size.width, 38)];
+        filterBar.backgroundColor = [UIColor colorWithWhite:0.1 alpha:1.0];
+        [panel addSubview:filterBar];
+        
+        NSArray *filterLabels = @[@"全部", @"🔓敏感词", @"❌错误", @"📋信息"];
+        for (NSInteger i = 0; i < filterLabels.count; i++) {
+            UIButton *filterBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+            CGFloat btnWidth = panel.bounds.size.width / filterLabels.count;
+            filterBtn.frame = CGRectMake(i * btnWidth, 0, btnWidth, 38);
+            [filterBtn setTitle:filterLabels[i] forState:UIControlStateNormal];
+            [filterBtn setTitleColor:(i == 0) ? [UIColor colorWithRed:0.3 green:0.7 blue:1.0 alpha:1.0] : [UIColor lightGrayColor] forState:UIControlStateNormal];
+            filterBtn.titleLabel.font = [UIFont systemFontOfSize:13];
+            filterBtn.tag = 1000 + i;
+            [filterBtn addTarget:self action:@selector(_filterLogs:) forControlEvents:UIControlEventTouchUpInside];
+            [filterBar addSubview:filterBtn];
+        }
+        
+        // 日志文本
+        UITextView *textView = [[UITextView alloc] initWithFrame:CGRectMake(8, 86, panel.bounds.size.width - 16, panel.bounds.size.height - 92)];
+        textView.backgroundColor = [UIColor clearColor];
+        textView.textColor = [UIColor colorWithWhite:0.85 alpha:1.0];
+        textView.font = [UIFont fontWithName:@"Menlo" size:11] ?: [UIFont systemFontOfSize:11];
+        textView.editable = NO;
+        textView.selectable = YES;
+        textView.showsVerticalScrollIndicator = YES;
+        textView.indicatorStyle = UIScrollViewIndicatorStyleWhite;
+        textView.tag = 2000;
+        
+        // 显示日志内容
+        if (allLogs.count == 0) {
+            textView.text = @"暂无日志\n\n提示：日志捕获可能尚未启动，请重启应用后查看。";
+            textView.textColor = [UIColor grayColor];
+        } else {
+            // 默认显示最近 500 条
+            NSUInteger showCount = MIN(allLogs.count, 500);
+            NSArray *recentLogs = [allLogs subarrayWithRange:NSMakeRange(allLogs.count - showCount, showCount)];
+            textView.text = [recentLogs componentsJoinedByString:@"\n"];
+        }
+        
+        [panel addSubview:textView];
+        
+        [keyWindow addSubview:container];
+        objc_setAssociatedObject(keyWindow, &kDKLogViewerKey, container, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        
+        // 滚动到底部
+        if (textView.text.length > 0) {
+            NSRange bottom = NSMakeRange(textView.text.length - 1, 1);
+            [textView scrollRangeToVisible:bottom];
+        }
+        
+        // 动画
+        container.alpha = 0;
+        panel.transform = CGAffineTransformMakeScale(0.9, 0.9);
+        [UIView animateWithDuration:0.25 animations:^{
+            container.alpha = 1.0;
+            panel.transform = CGAffineTransformIdentity;
+        }];
+    });
+}
+
+- (void)_hideLogViewer {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIWindow *keyWindow = [self _keyWindow];
+        if (!keyWindow) return;
+        
+        UIView *container = objc_getAssociatedObject(keyWindow, &kDKLogViewerKey);
+        if (container) {
+            [UIView animateWithDuration:0.2 animations:^{
+                container.alpha = 0;
+            } completion:^(BOOL finished) {
+                [container removeFromSuperview];
+            }];
+            objc_setAssociatedObject(keyWindow, &kDKLogViewerKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+    });
+}
+
+- (void)_clearLogsAndRefresh {
+    [[DKLogManager sharedInstance] clearLogs];
+    [self _hideLogViewer];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [self _showLogViewer];
+    });
+}
+
+- (void)_filterLogs:(UIButton *)sender {
+    NSInteger filterIndex = sender.tag - 1000;
+    UIWindow *keyWindow = [self _keyWindow];
+    if (!keyWindow) return;
+    
+    UIView *container = objc_getAssociatedObject(keyWindow, &kDKLogViewerKey);
+    if (!container) return;
+    
+    UITextView *textView = [container viewWithTag:2000];
+    if (!textView) return;
+    
+    // 更新过滤器按钮颜色
+    UIView *panel = container.subviews.firstObject;
+    if (panel) {
+        UIView *filterBar = nil;
+        for (UIView *sub in panel.subviews) {
+            if (sub.frame.size.height == 38 && sub.frame.origin.y == 44) {
+                filterBar = sub;
+                break;
+            }
+        }
+        if (filterBar) {
+            for (UIButton *btn in filterBar.subviews) {
+                if ([btn isKindOfClass:[UIButton class]]) {
+                    NSInteger tag = btn.tag - 1000;
+                    [btn setTitleColor:(tag == filterIndex) ? [UIColor colorWithRed:0.3 green:0.7 blue:1.0 alpha:1.0] : [UIColor lightGrayColor] forState:UIControlStateNormal];
+                }
+            }
+        }
+    }
+    
+    NSArray *filteredLogs = nil;
+    switch (filterIndex) {
+        case 0: // 全部
+            filteredLogs = [[DKLogManager sharedInstance] allLogs];
+            break;
+        case 1: // 敏感词
+            filteredLogs = [[DKLogManager sharedInstance] logsContaining:@"🔓"];
+            if (filteredLogs.count == 0) {
+                filteredLogs = [[DKLogManager sharedInstance] logsContaining:@"敏感词"];
+            }
+            if (filteredLogs.count == 0) {
+                filteredLogs = [[DKLogManager sharedInstance] logsContaining:@"983"];
+            }
+            break;
+        case 2: // 错误
+            filteredLogs = [[DKLogManager sharedInstance] logsContaining:@"❌"];
+            if (filteredLogs.count == 0) {
+                filteredLogs = [[DKLogManager sharedInstance] logsContaining:@"error"];
+            }
+            if (filteredLogs.count == 0) {
+                filteredLogs = [[DKLogManager sharedInstance] logsContaining:@"⚠️"];
+            }
+            break;
+        case 3: // 信息
+            filteredLogs = [[DKLogManager sharedInstance] logsContaining:@"📋"];
+            if (filteredLogs.count == 0) {
+                filteredLogs = [[DKLogManager sharedInstance] logsContaining:@"✅"];
+            }
+            break;
+    }
+    
+    if (filteredLogs.count == 0) {
+        textView.text = [NSString stringWithFormat:@"没有匹配的日志"];
+        textView.textColor = [UIColor grayColor];
+    } else {
+        NSUInteger showCount = MIN(filteredLogs.count, 500);
+        NSArray *recent = [filteredLogs subarrayWithRange:NSMakeRange(filteredLogs.count - showCount, showCount)];
+        textView.text = [recent componentsJoinedByString:@"\n"];
+        textView.textColor = [UIColor colorWithWhite:0.85 alpha:1.0];
+    }
 }
 
 #pragma mark - 添加账号弹窗
