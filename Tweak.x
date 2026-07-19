@@ -30,7 +30,6 @@
 #import "DKNetworkSessionManager.h"
 #import "DKPushNotificationBridge.h"
 #import "DKContentFilterBypass.h"
-#import "DKFilterURLProtocol.h"
 #import "DKLogManager.h"
 
 // ============================================================
@@ -1306,7 +1305,12 @@ static id hooked_sessionWithConfig(Class cls, SEL sel, NSURLSessionConfiguration
                 [[DKNetworkSessionManager sharedManager] setup];
                 [[DKPushNotificationBridge sharedInstance] setup];
                 [[DKContentFilterBypass sharedInstance] setup];
-                [DKFilterURLProtocol registerProtocol];
+                // DKFilterURLProtocol 已禁用：
+                // 注册自定义 NSURLProtocol 会导致系统 com.apple.CFNetwork.CustomProtocols
+                // 线程在处理认证挑战时调用 performDefaultHandlingForAuthenticationChallenge:，
+                // 该 selector 在 __NSCFURLLocalSessionConnection 上不存在，触发 SIGABRT 闪退。
+                // NSJSONSerialization hook 已能覆盖所有敏感词过滤场景，无需 URLProtocol。
+                // [DKFilterURLProtocol registerProtocol];
                 [[DKLogManager sharedInstance] startCapture];
                 [[DKAccountUI sharedInstance] setup];
 
