@@ -141,12 +141,36 @@ willPerformHTTPRedirection:(NSHTTPURLResponse *)response
               task:(NSURLSessionTask *)task
 didReceiveChallenge:(NSURLAuthenticationChallenge *)challenge
  completionHandler:(void (^)(NSURLSessionAuthChallengeDisposition, NSURLCredential * _Nullable))completionHandler {
-    // 转发认证挑战给原始 client
-    [[self client] URLProtocol:self didReceiveAuthenticationChallenge:challenge];
-    // 关键：使用 CancelAuthenticationChallenge 而不是 PerformDefaultHandling
-    // PerformDefaultHandling 会触发 performDefaultHandlingForAuthenticationChallenge:
-    // 该 selector 在 __NSCFURLLocalSessionConnection 上不存在，导致 SIGABRT 崩溃
-    completionHandler(NSURLSessionAuthChallengeCancelAuthenticationChallenge, nil);
+    // 不转发认证挑战给 client！
+    // [self.client URLProtocol:didReceiveAuthenticationChallenge:] 内部会调用
+    // performDefaultHandlingForAuthenticationChallenge: 到 __NSCFURLLocalSessionConnection，
+    // 该私有类不存在此 selector，导致 SIGABRT。
+    //
+    // 正确做法：直接用 sender 尝试用系统凭证处理，失败则取消
+    if ([challenge previousFailureCount] > 0) {
+        // 已经失败过，直接取消，避免无限循环
+        completionHandler(NSURLSessionAuthChallengeCancelAuthenticationChallenge, nil);
+    } else {
+        // 尝试使用挑战 sender 提供的默认凭证
+        NSURLCredential *credential = nil;
+        NSURLProtectionSpace *space = [challenge protectionSpace];
+        
+        if (space.authenticationMethod == NSURLAuthenticationMethodServerTrust) {
+            // HTTPS 服务器信任：接受所有证书（开发/调试用）
+            credential = [NSURLCredential credentialForTrust:space.serverTrust];
+        } else {
+            // 其他认证方式：尝试从 NSURLCredentialStorage 取凭证
+            NSURLCredential *stored = [[NSURLCredentialStorage sharedCredentialStorage]
+                                         defaultCredentialForProtectionSpace:space];
+            credential = stored;
+        }
+        
+        if (credential) {
+            completionHandler(NSURLSessionAuthChallengeUseCredential, credential);
+        } else {
+            completionHandler(NSURLSessionAuthChallengeCancelAuthenticationChallenge, nil);
+        }
+    }
 }
 
 @end
