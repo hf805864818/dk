@@ -10,6 +10,9 @@ static const NSUInteger kMaxLogEntries = 2000;
 // ============================================================
 static void (*original_NSLogv)(NSString *format, va_list args);
 
+// 前向声明 hooked_NSLogv
+static void hooked_NSLogv(NSString *format, va_list args);
+
 // ============================================================
 // 环形缓冲区
 // ============================================================
