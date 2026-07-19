@@ -821,12 +821,21 @@ static char kDKLogViewerKey;
         
         // 清空按钮
         UIButton *clearBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-        clearBtn.frame = CGRectMake(panel.bounds.size.width - 120, 0, 55, 44);
+        clearBtn.frame = CGRectMake(panel.bounds.size.width - 175, 0, 55, 44);
         [clearBtn setTitle:@"清空" forState:UIControlStateNormal];
         [clearBtn setTitleColor:[UIColor colorWithRed:1.0 green:0.35 blue:0.25 alpha:1.0] forState:UIControlStateNormal];
         clearBtn.titleLabel.font = [UIFont systemFontOfSize:14];
         [clearBtn addTarget:self action:@selector(_clearLogsAndRefresh) forControlEvents:UIControlEventTouchUpInside];
         [titleBar addSubview:clearBtn];
+        
+        // 导出按钮
+        UIButton *exportBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+        exportBtn.frame = CGRectMake(panel.bounds.size.width - 120, 0, 55, 44);
+        [exportBtn setTitle:@"导出" forState:UIControlStateNormal];
+        [exportBtn setTitleColor:[UIColor colorWithRed:0.3 green:0.7 blue:1.0 alpha:1.0] forState:UIControlStateNormal];
+        exportBtn.titleLabel.font = [UIFont systemFontOfSize:14];
+        [exportBtn addTarget:self action:@selector(_exportLogs) forControlEvents:UIControlEventTouchUpInside];
+        [titleBar addSubview:exportBtn];
         
         // 关闭按钮
         UIButton *closeBtn = [UIButton buttonWithType:UIButtonTypeSystem];
@@ -920,6 +929,36 @@ static char kDKLogViewerKey;
     [self _hideLogViewer];
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         [self _showLogViewer];
+    });
+}
+
+- (void)_exportLogs {
+    // 导出日志到文件，然后用系统分享面板分享
+    NSString *filePath = [[DKLogManager sharedInstance] exportLogsToFile];
+    if (!filePath) {
+        [self _showToast:@"导出失败"];
+        return;
+    }
+    
+    dispatch_async(dispatch_get_main_queue(), ^{
+        NSURL *fileURL = [NSURL fileURLWithPath:filePath];
+        UIActivityViewController *activityVC = [[UIActivityViewController alloc]
+                                                  initWithActivityItems:@[fileURL]
+                                                  applicationActivities:nil];
+        
+        // iPad 兼容
+        if (UI_USER_INTERFACE_IDIOM() == UIUserInterfaceIdiomPad) {
+            activityVC.popoverPresentationController.sourceView = [self _keyWindow];
+            activityVC.popoverPresentationController.sourceRect = CGRectMake(
+                [self _keyWindow].bounds.size.width / 2,
+                [self _keyWindow].bounds.size.height / 2,
+                0, 0);
+        }
+        
+        UIViewController *rootVC = [self _rootViewController];
+        [rootVC presentViewController:activityVC animated:YES completion:nil];
+        
+        [self _showToast:[NSString stringWithFormat:@"日志已导出: %@", [filePath lastPathComponent]]];
     });
 }
 
