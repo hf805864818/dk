@@ -58,4 +58,17 @@
 /// 为所有账号注册推送类别
 - (void)registerNotificationCategories;
 
+/// 设置当前活跃账号的应用徽章数（由 hook setApplicationIconBadgeNumber 调用）
+/// 这样切换账号时可以保存/恢复各账号的徽章数
+- (void)setBadgeCount:(NSInteger)count forAccount:(NSString *)accountName;
+
+/// 获取某账号的徽章数
+- (NSInteger)badgeCountForAccount:(NSString *)accountName;
+
+/// 获取所有账号的徽章总数（用于悬浮按钮角标）
+- (NSInteger)totalBadgeCount;
+
+/// 设置当前活跃账号，用于 badge hook 时自动归属
+- (void)setActiveAccount:(NSString *)accountName;
+
 @end

@@ -8,12 +8,15 @@
 // ============================================================
 static NSString *const kDKDeviceTokenKey = @"DK_DeviceToken";
 static NSString *const kDKNotificationCountsKey = @"DK_NotificationCounts";
+static NSString *const kDKBadgeCountsKey = @"DK_BadgeCounts";
 static NSString *const kDKNotificationCategoryID = @"DK_ACCOUNT_MSG";
 
 @implementation DKPushNotificationBridge {
     NSString *_deviceTokenString;
     NSMutableDictionary<NSString *, NSNumber *> *_unreadCounts;
     NSMutableDictionary<NSString *, NSMutableArray<NSDictionary *> *> *_pendingNotifications;
+    NSMutableDictionary<NSString *, NSNumber *> *_badgeCounts;
+    NSString *_activeAccount;
 }
 
 + (instancetype)sharedInstance {
@@ -30,6 +33,7 @@ static NSString *const kDKNotificationCategoryID = @"DK_ACCOUNT_MSG";
     if (self) {
         _unreadCounts = [NSMutableDictionary dictionary];
         _pendingNotifications = [NSMutableDictionary dictionary];
+        _badgeCounts = [NSMutableDictionary dictionary];
         
         // 恢复已保存的 deviceToken
         _deviceTokenString = [[NSUserDefaults standardUserDefaults] stringForKey:kDKDeviceTokenKey];
@@ -43,6 +47,7 @@ static NSString *const kDKNotificationCategoryID = @"DK_ACCOUNT_MSG";
     NSLog(@"[DK] 推送通知桥接已初始化");
     [self registerNotificationCategories];
     [self _loadUnreadCounts];
+    [self _loadBadgeCounts];
 }
 
 - (void)registerNotificationCategories {
@@ -226,6 +231,7 @@ static NSString *const kDKNotificationCategoryID = @"DK_ACCOUNT_MSG";
 - (void)clearNotificationsForAccount:(NSString *)accountName {
     _unreadCounts[accountName] = @(0);
     [self _saveUnreadCounts];
+    [self clearBadgeForAccount:accountName];
     
     // 更新应用角标
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -261,6 +267,54 @@ static NSString *const kDKNotificationCategoryID = @"DK_ACCOUNT_MSG";
 
 - (void)_saveUnreadCounts {
     [[NSUserDefaults standardUserDefaults] setObject:[_unreadCounts copy] forKey:kDKNotificationCountsKey];
+    [[NSUserDefaults standardUserDefaults] synchronize];
+}
+
+#pragma mark - 徽章数追踪（per-account）
+
+/// 当应用徽章数更新时，hook 调用此方法将徽章数归属到当前活跃账号
+- (void)setBadgeCount:(NSInteger)count forAccount:(NSString *)accountName {
+    if (!accountName) return;
+    _badgeCounts[accountName] = @(count);
+    [self _saveBadgeCounts];
+    NSLog(@"[DK] 🔔 账号 %@ 徽章数: %ld", accountName, (long)count);
+}
+
+/// 获取某账号记录的徽章数
+- (NSInteger)badgeCountForAccount:(NSString *)accountName {
+    if (!accountName) return 0;
+    return [_badgeCounts[accountName] integerValue];
+}
+
+/// 所有账号徽章总数（用于悬浮按钮角标）
+- (NSInteger)totalBadgeCount {
+    NSInteger total = 0;
+    for (NSNumber *count in _badgeCounts.allValues) {
+        total += [count integerValue];
+    }
+    return total;
+}
+
+/// 设置当前活跃账号
+- (void)setActiveAccount:(NSString *)accountName {
+    _activeAccount = accountName;
+}
+
+/// 清除某账号的徽章数（切换账号后标记已读）
+- (void)clearBadgeForAccount:(NSString *)accountName {
+    _badgeCounts[accountName] = @(0);
+    [self _saveBadgeCounts];
+}
+
+- (void)_loadBadgeCounts {
+    NSDictionary *saved = [[NSUserDefaults standardUserDefaults] dictionaryForKey:kDKBadgeCountsKey];
+    if (saved) {
+        _badgeCounts = [saved mutableCopy];
+    }
+}
+
+- (void)_saveBadgeCounts {
+    [[NSUserDefaults standardUserDefaults] setObject:[_badgeCounts copy] forKey:kDKBadgeCountsKey];
     [[NSUserDefaults standardUserDefaults] synchronize];
 }
 

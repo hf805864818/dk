@@ -37,6 +37,9 @@
 /// 刷新账号菜单
 - (void)refreshMenu;
 
+/// 刷新悬浮按钮角标（总未读通知数）
+- (void)refreshFloatingBadge;
+
 /// 完全清理 UI
 - (void)cleanup;
 

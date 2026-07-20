@@ -33,6 +33,7 @@ static char kDKMenuViewKey;
 static char kDKGestureKey;
 static char kDKHiddenIndicatorKey;
 static char kDKLogViewerKey;
+static char kDKBadgeLabelKey;
 
 @interface DKAccountUI ()
 @property (nonatomic, weak) UIWindow *targetWindow;
@@ -118,6 +119,7 @@ static char kDKLogViewerKey;
 - (void)_accountDidChange:(NSNotification *)notification {
     dispatch_async(dispatch_get_main_queue(), ^{
         [self refreshMenu];
+        [self refreshFloatingBadge];
         NSString *newAccount = notification.userInfo[@"newAccount"];
         if (newAccount) {
             [[DKPushNotificationBridge sharedInstance] clearNotificationsForAccount:newAccount];
@@ -349,6 +351,20 @@ static char kDKLogViewerKey;
         [keyWindow addSubview:button];
         objc_setAssociatedObject(keyWindow, &kDKFloatingButtonKey, button, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         
+        // 角标标签（总未读通知数）
+        CGFloat badgeSize = 22.0;
+        UILabel *badgeLabel = [[UILabel alloc] initWithFrame:CGRectMake(kFloatingButtonSize - badgeSize + 6, -4, badgeSize, badgeSize)];
+        badgeLabel.backgroundColor = [UIColor redColor];
+        badgeLabel.textColor = [UIColor whiteColor];
+        badgeLabel.font = [UIFont boldSystemFontOfSize:11];
+        badgeLabel.textAlignment = NSTextAlignmentCenter;
+        badgeLabel.layer.cornerRadius = badgeSize / 2.0;
+        badgeLabel.clipsToBounds = YES;
+        badgeLabel.hidden = YES;
+        badgeLabel.tag = 9998;
+        [button addSubview:badgeLabel];
+        objc_setAssociatedObject(button, &kDKBadgeLabelKey, badgeLabel, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        
         [self _hideHiddenIndicator];
         
         button.transform = CGAffineTransformMakeScale(0.1, 0.1);
@@ -361,10 +377,33 @@ static char kDKLogViewerKey;
                          animations:^{
             button.transform = CGAffineTransformIdentity;
             button.alpha = 1.0;
-        } completion:nil];
+        } completion:^(BOOL finished) {
+            [self refreshFloatingBadge];
+        }];
         
         self.isFloatingButtonVisible = YES;
         NSLog(@"[DK] ✅ 悬浮按钮已显示");
+    });
+}
+
+- (void)refreshFloatingBadge {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIWindow *keyWindow = [self _keyWindow];
+        if (!keyWindow) return;
+        
+        UIButton *button = objc_getAssociatedObject(keyWindow, &kDKFloatingButtonKey);
+        if (!button) return;
+        
+        UILabel *badgeLabel = objc_getAssociatedObject(button, &kDKBadgeLabelKey);
+        if (!badgeLabel) return;
+        
+        NSInteger totalBadge = [[DKPushNotificationBridge sharedInstance] totalBadgeCount];
+        if (totalBadge <= 0) {
+            badgeLabel.hidden = YES;
+        } else {
+            badgeLabel.hidden = NO;
+            badgeLabel.text = totalBadge > 99 ? @"99+" : [NSString stringWithFormat:@"%ld", (long)totalBadge];
+        }
     });
 }
 
@@ -594,12 +633,16 @@ static char kDKLogViewerKey;
             [rowView addSubview:label];
             
             if (!isAddAccount && !isHideOption && !isFilterToggle && !isClearData && !isVersionInfo && !isLogViewer) {
+                // 优先使用徽章数（来自 applicationIconBadgeNumber hook），
+                // 回退到推送通知未读数（来自推送 payload 解析）
+                NSInteger badgeCount = [[DKPushNotificationBridge sharedInstance] badgeCountForAccount:item];
                 NSInteger unread = [[DKPushNotificationBridge sharedInstance] unreadCountForAccount:item];
-                if (unread > 0) {
+                NSInteger total = badgeCount > 0 ? badgeCount : unread;
+                if (total > 0) {
                     UILabel *badge = [[UILabel alloc] initWithFrame:CGRectMake(kMenuWidth - 42, 12, 24, 24)];
                     badge.backgroundColor = [UIColor redColor];
                     badge.textColor = [UIColor whiteColor];
-                    badge.text = unread > 99 ? @"99+" : [NSString stringWithFormat:@"%ld", (long)unread];
+                    badge.text = total > 99 ? @"99+" : [NSString stringWithFormat:@"%ld", (long)total];
                     badge.font = [UIFont boldSystemFontOfSize:11];
                     badge.textAlignment = NSTextAlignmentCenter;
                     badge.layer.cornerRadius = 12;

@@ -842,6 +842,30 @@ fetchCompletionHandler:(void (^)(UIBackgroundFetchResult))completionHandler {
 %end
 
 // ============================================================
+// Hook 4.5: UIApplication - setApplicationIconBadgeNumber
+// 捕获每个账号的徽章数，实现多账号通知角标
+// ============================================================
+%hook UIApplication
+
+- (void)setApplicationIconBadgeNumber:(NSInteger)applicationIconBadgeNumber {
+    %orig;
+    
+    // 将徽章数归属到当前活跃账号
+    DKAccountManager *mgr = [DKAccountManager sharedManager];
+    NSString *currentName = [mgr currentAccountName];
+    if (currentName) {
+        [[DKPushNotificationBridge sharedInstance] setBadgeCount:applicationIconBadgeNumber
+                                                      forAccount:currentName];
+        // 刷新悬浮按钮角标
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [[DKAccountUI sharedInstance] refreshFloatingBadge];
+        });
+    }
+}
+
+%end
+
+// ============================================================
 // Hook 5: NSURLSessionConfiguration - 网络配置隔离
 // 每个账号使用独立的 URLSession 配置
 // ============================================================
