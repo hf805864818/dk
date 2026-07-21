@@ -35,11 +35,42 @@ static char kDKHiddenIndicatorKey;
 static char kDKLogViewerKey;
 static char kDKBadgeLabelKey;
 
-@interface DKAccountUI ()
+@interface DKAccountUI () <UIGestureRecognizerDelegate>
 @property (nonatomic, weak) UIWindow *targetWindow;
 @property (nonatomic, assign) BOOL isMenuVisible;
 @property (nonatomic, assign) BOOL isFloatingButtonVisible;
 @property (nonatomic, assign) NSInteger gestureInstallRetryCount;
+
+// 私有方法声明
+- (UIWindow *)_keyWindow;
+- (UIViewController *)_rootViewController;
+- (void)_showToast:(NSString *)message;
+- (void)_promptAddAccount;
+- (void)_promptDeleteAccount:(NSString *)accountName;
+- (void)_promptRenameAccount:(NSString *)accountName;
+- (void)_promptClearMultiAccountData;
+- (void)_showLogViewer;
+- (void)_hideLogViewer;
+- (void)_clearLogsAndRefresh;
+- (void)_exportLogs;
+- (void)_filterLogs:(UIButton *)sender;
+- (void)_toggleContentFilter;
+- (void)_handleMenuItemTap:(UITapGestureRecognizer *)gesture;
+- (void)_handleMenuItemLongPress:(UILongPressGestureRecognizer *)gesture;
+- (void)_handleButtonTap:(UIButton *)sender;
+- (void)_handleDoubleTap:(UITapGestureRecognizer *)gesture;
+- (void)_handlePan:(UIPanGestureRecognizer *)gesture;
+- (void)_applicationDidFinishLaunching:(NSNotification *)notification;
+- (void)_sceneDidActivate:(NSNotification *)notification;
+- (void)_accountDidChange:(NSNotification *)notification;
+- (void)_tryInstallGestureWithRetry;
+- (void)_installGestureRecognizer;
+- (void)_deviceDidShake:(NSNotification *)notification;
+- (void)_setupShakeDetection;
+- (void)_showHiddenIndicator;
+- (void)_hideHiddenIndicator;
+- (void)_handleIndicatorTap:(UITapGestureRecognizer *)gesture;
+- (void)_handleLongPress:(UILongPressGestureRecognizer *)gesture;
 @end
 
 @implementation DKAccountUI
