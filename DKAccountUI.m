@@ -839,6 +839,7 @@ static char kDKBadgeLabelKey;
         UITapGestureRecognizer *bgTap = [[UITapGestureRecognizer alloc]
                                           initWithTarget:self action:@selector(_hideLogViewer)];
         bgTap.cancelsTouchesInView = NO;
+        bgTap.delegate = (id<UIGestureRecognizerDelegate>)self;
         [container addGestureRecognizer:bgTap];
         
         // 日志面板
@@ -848,6 +849,7 @@ static char kDKBadgeLabelKey;
         panel.backgroundColor = [UIColor colorWithWhite:0.08 alpha:0.98];
         panel.layer.cornerRadius = 14;
         panel.clipsToBounds = YES;
+        panel.tag = 9998;  // 用于 bgTap delegate 判断
         [container addSubview:panel];
         
         // 标题栏
@@ -892,6 +894,7 @@ static char kDKBadgeLabelKey;
         // 过滤器标签栏
         UIView *filterBar = [[UIView alloc] initWithFrame:CGRectMake(0, 44, panel.bounds.size.width, 38)];
         filterBar.backgroundColor = [UIColor colorWithWhite:0.1 alpha:1.0];
+        filterBar.tag = 9997;  // 用于快速查找
         [panel addSubview:filterBar];
         
         NSArray *filterLabels = @[@"全部", @"🔓敏感词", @"❌错误", @"📋信息"];
@@ -948,6 +951,18 @@ static char kDKBadgeLabelKey;
             panel.transform = CGAffineTransformIdentity;
         }];
     });
+
+#pragma mark - UIGestureRecognizerDelegate
+
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer
+       shouldReceiveTouch:(UITouch *)touch {
+    // 点击在面板区域时不触发背景遮罩的关闭手势
+    UIView *hitView = touch.view;
+    while (hitView) {
+        if (hitView.tag == 9998) return NO;
+        hitView = hitView.superview;
+    }
+    return YES;
 }
 
 - (void)_hideLogViewer {
@@ -1017,21 +1032,12 @@ static char kDKBadgeLabelKey;
     if (!textView) return;
     
     // 更新过滤器按钮颜色
-    UIView *panel = container.subviews.firstObject;
-    if (panel) {
-        UIView *filterBar = nil;
-        for (UIView *sub in panel.subviews) {
-            if (sub.frame.size.height == 38 && sub.frame.origin.y == 44) {
-                filterBar = sub;
-                break;
-            }
-        }
-        if (filterBar) {
-            for (UIButton *btn in filterBar.subviews) {
-                if ([btn isKindOfClass:[UIButton class]]) {
-                    NSInteger tag = btn.tag - 1000;
-                    [btn setTitleColor:(tag == filterIndex) ? [UIColor colorWithRed:0.3 green:0.7 blue:1.0 alpha:1.0] : [UIColor lightGrayColor] forState:UIControlStateNormal];
-                }
+    UIView *filterBar = [container viewWithTag:9997];
+    if (filterBar) {
+        for (UIButton *btn in filterBar.subviews) {
+            if ([btn isKindOfClass:[UIButton class]]) {
+                NSInteger tag = btn.tag - 1000;
+                [btn setTitleColor:(tag == filterIndex) ? [UIColor colorWithRed:0.3 green:0.7 blue:1.0 alpha:1.0] : [UIColor lightGrayColor] forState:UIControlStateNormal];
             }
         }
     }
