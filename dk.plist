@@ -2,6 +2,7 @@
     Filter = {
         Bundles = (
             "com.stone.solo.cn",
+            "com.tencent.xin",
         );
     };
     DKConfig = {
@@ -9,6 +10,7 @@
         // 添加新应用只需在此数组中追加对应的 Bundle ID
         SupportedBundles = (
             "com.stone.solo.cn",
+            "com.tencent.xin",
         );
         // 悬浮按钮隐藏方式: "doubletap"(双击) / "swipe"(侧滑) / "both"(两者)
         HideGesture = "both";

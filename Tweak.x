@@ -136,6 +136,10 @@ static int (*original_mkdir)(const char *path, mode_t mode);
 static int (*original_mkdirat)(int fd, const char *path, mode_t mode);
 static ssize_t (*original_write)(int fd, const void *buf, size_t count);
 static ssize_t (*original_read)(int fd, void *buf, size_t count);
+static void *(*original_mmap)(void *addr, size_t len, int prot, int flags, int fd, off_t offset);
+static int (*original_msync)(void *addr, size_t len, int flags);
+static int (*original_munmap)(void *addr, size_t len);
+static int (*original_ftruncate)(int fd, off_t length);
 
 static int hooked_open(const char *path, int flags, ...);
 static int hooked_openat(int fd, const char *path, int flags, ...);
@@ -150,6 +154,10 @@ static int hooked_mkdir(const char *path, mode_t mode);
 static int hooked_mkdirat(int fd, const char *path, mode_t mode);
 static ssize_t hooked_write(int fd, const void *buf, size_t count);
 static ssize_t hooked_read(int fd, void *buf, size_t count);
+static void *hooked_mmap(void *addr, size_t len, int prot, int flags, int fd, off_t offset);
+static int hooked_msync(void *addr, size_t len, int flags);
+static int hooked_munmap(void *addr, size_t len);
+static int hooked_ftruncate(int fd, off_t length);
 
 // CFPreferences 隔离用 plist 路径
 // 与 NSUserDefaults Hook 共享同一个账号隔离 plist，
@@ -1261,10 +1269,15 @@ static id hooked_sessionWithConfig(Class cls, SEL sel, NSURLSessionConfiguration
             {"mkdirat", hooked_mkdirat, (void **)&original_mkdirat},
             {"write",   hooked_write,   (void **)&original_write},
             {"read",    hooked_read,    (void **)&original_read},
+            // mmap 系列（4 个）— 拦截 MMKV 内存映射操作
+            {"mmap",    hooked_mmap,    (void **)&original_mmap},
+            {"msync",   hooked_msync,   (void **)&original_msync},
+            {"munmap",  hooked_munmap,  (void **)&original_munmap},
+            {"ftruncate", hooked_ftruncate, (void **)&original_ftruncate},
         };
-        // 26 个 Hook：Keychain 4 + CFPreferences 9 + POSIX 13
-        rebind_symbols(rebindings, 26);
-        NSLog(@"[DK] fishhook C 函数 Hook 已安装（26 个：Keychain 4 + CFPreferences 9 + POSIX 13）");
+        // 30 个 Hook：Keychain 4 + CFPreferences 9 + POSIX 13 + mmap 4
+        rebind_symbols(rebindings, 30);
+        NSLog(@"[DK] fishhook C 函数 Hook 已安装（30 个：Keychain 4 + CFPreferences 9 + POSIX 13 + mmap 4）");
 
         // ============================================
         // 第 2.5 步：Hook NSURLSession 类方法 — 代理注入（SSE 流式响应）
@@ -1493,6 +1506,41 @@ static ssize_t hooked_write(int fd, const void *buf, size_t count) {
 
 static ssize_t hooked_read(int fd, void *buf, size_t count) {
     return original_read(fd, buf, count);
+}
+
+// ============================================================
+// mmap / msync / munmap / ftruncate — MMKV 内存映射 Hook
+//
+// MMKV（微信/TRAE 使用的 KV 存储库）核心流程：
+//   open() → ftruncate() → mmap() → 直接写内存 → msync() 刷盘
+//
+// open() 已被 Hook 重定向到隔离目录，fd 已指向正确文件。
+// ftruncate/mmap/msync/munmap 操作 fd 而非路径，因此直接透传即可。
+// 保留这些 Hook 是为了：
+//   1. 保护 fd 不被意外关闭/替换（未来可扩展）
+//   2. 调试日志输出，方便排查 MMKV 数据隔离问题
+//   3. 如果未来需要 fd 级重定向，无需改动调用方
+// ============================================================
+
+static void *hooked_mmap(void *addr, size_t len, int prot, int flags, int fd, off_t offset) {
+    // fd 已由 hooked_open 重定向到隔离目录，直接透传
+    return original_mmap(addr, len, prot, flags, fd, offset);
+}
+
+static int hooked_msync(void *addr, size_t len, int flags) {
+    // MMKV 用 msync 将内存映射脏页刷回磁盘
+    // 由于 addr 来自 isolated 文件的 mmap，数据自动写入隔离目录
+    return original_msync(addr, len, flags);
+}
+
+static int hooked_munmap(void *addr, size_t len) {
+    return original_munmap(addr, len);
+}
+
+static int hooked_ftruncate(int fd, off_t length) {
+    // MMKV 用 ftruncate 设置文件大小后再 mmap
+    // fd 已由 hooked_open 重定向，直接透传
+    return original_ftruncate(fd, length);
 }
 
 // ============================================================
