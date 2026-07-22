@@ -982,6 +982,7 @@ static char kDKBadgeLabelKey;
             panel.transform = CGAffineTransformIdentity;
         }];
     });
+}
 
 #pragma mark - UIGestureRecognizerDelegate
 
