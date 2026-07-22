@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.0.80] - 2026-07-22
+
+- b9867b9 feat: 添加微信反越狱检测模块 DKWeChatAntiDetect
+
+
 ## [1.0.79] - 2026-07-22
 
 - 05505cd fix: _showLogViewer 方法缺少闭合 } 导致编译错误
