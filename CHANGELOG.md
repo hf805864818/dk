@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.0.92] - 2026-07-22
+
+- 50af32f feat: 新增微信多开越狱检测绕过 + 防检测模块
+
+
 ## [1.0.91] - 2026-07-22
 
 - e3ea2a8 Trigger CI rebuild with v1.0.79 codebase
