@@ -31,6 +31,8 @@
 #import "DKPushNotificationBridge.h"
 #import "DKContentFilterBypass.h"
 #import "DKLogManager.h"
+#import "DKWeChatAntiDetect.h"
+#import "DKWeChatJailBreakHook.h"
 
 // ============================================================
 // 版本号编译宏（由 Makefile 注入）
@@ -1369,6 +1371,19 @@ static id hooked_sessionWithConfig(Class cls, SEL sel, NSURLSessionConfiguration
                 NSLog(@"[DK] ✅ 所有模块初始化完成");
             });
         });
+
+        // ============================================
+        // 微信专属：越狱检测绕过 + 防检测
+        //
+        // 仅在微信（com.tencent.xin）进程中激活。
+        // TRAE 进程（com.stone.solo.cn）中 bundleID 不匹配，
+        // 此代码块完全跳过，零影响。
+        // ============================================
+        if ([bundleID isEqualToString:@"com.tencent.xin"]) {
+            NSLog(@"[DK] 🔐 检测到微信，安装越狱检测绕过...");
+            [[DKWeChatAntiDetect sharedInstance] install];
+            [[DKWeChatJailBreakHook sharedInstance] install];
+        }
     }
 }
 

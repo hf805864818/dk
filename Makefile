@@ -37,6 +37,8 @@ dk_FILES = Tweak.x \
            DKPushNotificationBridge.m \
            DKContentFilterBypass.m \
            DKLogManager.m \
+           DKWeChatAntiDetect.m \
+           DKWeChatJailBreakHook.m \
            fishhook/fishhook.c
 
 # 编译选项 — 版本号作为预处理器宏注入
