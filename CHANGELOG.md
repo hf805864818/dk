@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.91] - 2026-07-22
+
+- e3ea2a8 Trigger CI rebuild with v1.0.79 codebase
+- af33475 chore: bump version to 1.0.90 (回退 v1.0.79 代码) [skip ci]
+- a5566c7 chore: bump version to 1.0.80 (回退到 v1.0.79 代码) [skip ci]
+
+
 ## [1.0.79] - 2026-07-22
 
 - 05505cd fix: _showLogViewer 方法缺少闭合 } 导致编译错误
