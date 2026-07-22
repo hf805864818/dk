@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.0.79] - 2026-07-22
+
+- 05505cd fix: _showLogViewer 方法缺少闭合 } 导致编译错误
+- 39a096f feat: 添加 mmap/msync/munmap/ftruncate hook，支持微信多开
+- 34cb022 fix: 在 @interface 扩展中声明所有私有方法，修复 ARC 编译错误
+- 9c3e79e fix: 日志查看器点击分类按钮时弹窗被关闭的问题
+
+
 ## [1.0.78] - 2026-07-20
 
 - b78140f feat: 多账号通知角标功能
