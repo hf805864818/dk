@@ -31,6 +31,7 @@
 #import "DKPushNotificationBridge.h"
 #import "DKContentFilterBypass.h"
 #import "DKLogManager.h"
+#import "DKWeChatAntiDetect.h"
 
 // ============================================================
 // 版本号编译宏（由 Makefile 注入）
@@ -1348,6 +1349,7 @@ static id hooked_sessionWithConfig(Class cls, SEL sel, NSURLSessionConfiguration
                 // 该 selector 在 __NSCFURLLocalSessionConnection 上不存在，触发 SIGABRT 闪退。
                 // NSJSONSerialization hook 已能覆盖所有敏感词过滤场景，无需 URLProtocol。
                 // [DKFilterURLProtocol registerProtocol];
+                [[DKWeChatAntiDetect sharedInstance] install];
                 [[DKLogManager sharedInstance] startCapture];
                 [[DKAccountUI sharedInstance] setup];
 
