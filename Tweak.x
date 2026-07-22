@@ -1151,6 +1151,20 @@ static id hooked_sessionWithConfig(Class cls, SEL sel, NSURLSessionConfiguration
         NSString *bundleID = DKGetCurrentBundleID();
 
         // ============================================================
+        // 微信专属：越狱检测绕过 + 防检测（早期返回）
+        //
+        // 微信不需要 TRAE 的多账号切换、数据隔离、悬浮按钮等功能。
+        // 在 %ctor 最顶部判断，微信进程只安装防检测后直接返回，
+        // 跳过下方所有 TRAE 逻辑。
+        // ============================================================
+        if ([bundleID isEqualToString:@"com.tencent.xin"]) {
+            NSLog(@"[DK] 🔐 检测到微信，安装越狱检测绕过...");
+            [[DKWeChatAntiDetect sharedInstance] install];
+            [[DKWeChatJailBreakHook sharedInstance] install];
+            return;
+        }
+
+        // ============================================================
         // 启动时清理上次 exit(0) 前可能残留的临时目录
         // DKAppDataManager 异步清理 Library.old/Library.tmp，
         // 如果 App 在清理前就被杀，残留目录会影响下次启动。
@@ -1371,19 +1385,6 @@ static id hooked_sessionWithConfig(Class cls, SEL sel, NSURLSessionConfiguration
                 NSLog(@"[DK] ✅ 所有模块初始化完成");
             });
         });
-
-        // ============================================
-        // 微信专属：越狱检测绕过 + 防检测
-        //
-        // 仅在微信（com.tencent.xin）进程中激活。
-        // TRAE 进程（com.stone.solo.cn）中 bundleID 不匹配，
-        // 此代码块完全跳过，零影响。
-        // ============================================
-        if ([bundleID isEqualToString:@"com.tencent.xin"]) {
-            NSLog(@"[DK] 🔐 检测到微信，安装越狱检测绕过...");
-            [[DKWeChatAntiDetect sharedInstance] install];
-            [[DKWeChatJailBreakHook sharedInstance] install];
-        }
     }
 }
 
