@@ -245,6 +245,12 @@ static BOOL DKShouldUseOriginalCFPreferences(void) {
     return DKShouldUseOriginalDefaults();
 }
 
+// ============================================================
+// %group TRAE — 所有 TRAE 多账号隔离 Hook
+// 仅在非微信进程通过 %init(TRAE) 激活，微信进程跳过。
+// ============================================================
+%group TRAE
+
 %hook NSUserDefaults
 
 - (id)objectForKey:(NSString *)defaultName {
@@ -1127,6 +1133,8 @@ static id hooked_sessionWithConfig(Class cls, SEL sel, NSURLSessionConfiguration
 
 %end
 
+%end // %group TRAE
+
 // ============================================================
 // 构造函数 - 插件加载时调用
 //
@@ -1248,8 +1256,8 @@ static id hooked_sessionWithConfig(Class cls, SEL sel, NSURLSessionConfiguration
         // 必须在 App 初始化前安装，否则 App 启动时会读取原始存储
         // 此时 _dkStartupGuard = YES，Hook 暂时透传
         // ============================================
-        %init;
-        NSLog(@"[DK] Logos Hook 已安装");
+        %init(TRAE);
+        NSLog(@"[DK] Logos Hook 已安装（TRAE 多账号隔离）");
 
         // ============================================
         // 第二步：安装 C 函数 Hook（fishhook rebind_symbols）

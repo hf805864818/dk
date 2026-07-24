@@ -13,7 +13,7 @@
 
 + (instancetype)sharedInstance;
 
-/// 安装 fishhook C 函数拦截（stat/access/fopen/sysctl/getenv）
+/// 安装 fishhook C 函数拦截（仅 sysctl 进程过滤）
 /// 仅在微信进程中调用
 - (void)install;
 
