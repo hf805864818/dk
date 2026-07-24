@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.0.96] - 2026-07-24
+
+- 00ec04b v1.0.95: 修复插件冲突 — fishhook→MSHookFunction + canOpenURL fallback 修正
+
+
 ## [1.0.95] - 2026-07-24
 
 - 33ea74b v1.0.94: 修复微信注入闪退 — %group TRAE 隔离 + 移除冲突 Hook
