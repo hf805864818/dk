@@ -12,7 +12,7 @@
 // ============================================================
 
 #import "DKWeChatAntiDetect.h"
-#import "fishhook/fishhook.h"
+#import <substrate.h>
 #import <sys/sysctl.h>
 #import <string.h>
 
@@ -84,12 +84,13 @@ static int hooked_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, 
 - (void)install {
     NSLog(@"[DK] 🔐 安装微信越狱检测绕过（sysctl 进程过滤）");
 
-    struct rebinding rebindings[] = {
-        {"sysctl", hooked_sysctl, (void **)&original_sysctl},
-    };
-    rebind_symbols(rebindings, sizeof(rebindings) / sizeof(rebindings[0]));
+    // 使用 MSHookFunction 替代 fishhook：
+    // fishhook 的 rebind_symbols 是全局符号重绑定，会覆盖其他插件的 Hook 链，
+    // 导致其他插件 Hook 失效。MSHookFunction 是 Cydia Substrate 的 Hook 机制，
+    // 原生支持 Hook 链，多个插件 Hook 同一函数时各层都会被正确调用。
+    MSHookFunction((void *)sysctl, (void *)hooked_sysctl, (void **)&original_sysctl);
 
-    NSLog(@"[DK] ✅ 微信越狱检测绕过已安装（1 个 C 函数：sysctl）");
+    NSLog(@"[DK] ✅ 微信越狱检测绕过已安装（1 个 C 函数：sysctl，MSHookFunction）");
 }
 
 @end

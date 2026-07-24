@@ -113,7 +113,10 @@ static BOOL hooked_canOpenURLForJailbreak(id self, SEL _cmd, id url) {
         return NO;
     }
 
-    return original_canOpenURLForJailbreak ? original_canOpenURLForJailbreak(self, _cmd, url) : NO;
+    // 修复：original 为 NULL 时（未能 Hook 到原函数），返回 YES 而非 NO。
+    // 返回 NO 会导致所有 URL Scheme 检测失败，其他插件依赖的合法 URL
+    // 跳转（如第三方登录、支付回调）全部被拒绝。
+    return original_canOpenURLForJailbreak ? original_canOpenURLForJailbreak(self, _cmd, url) : YES;
 }
 
 // ============================================================
