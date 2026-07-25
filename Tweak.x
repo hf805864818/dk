@@ -246,8 +246,10 @@ static BOOL DKShouldUseOriginalCFPreferences(void) {
 }
 
 // ============================================================
-// %group TRAE — 所有 TRAE 多账号隔离 Hook
-// 仅在非微信进程通过 %init(TRAE) 激活，微信进程跳过。
+// %group TRAE — 所有多账号隔离 Hook
+// 微信进程也会通过 %init(TRAE) 安装这些 Hook，
+// 但运行时所有 Hook 通过 DKShouldUseOriginalDefaults 守卫函数
+// 透传到 %orig，不影响微信行为。
 // ============================================================
 %group TRAE
 

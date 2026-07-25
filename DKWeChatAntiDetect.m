@@ -1,7 +1,9 @@
 // ============================================================
 // DKWeChatAntiDetect.m — 微信 C 层越狱检测绕过
 //
-// 策略：仅过滤进程列表中的越狱进程名（sysctl）。
+// 策略：
+//   1. 过滤进程列表中的越狱进程名（sysctl）
+//   2. 过滤 dyld 镜像列表中的越狱 dylib 路径（dyld_get_image_name）
 //
 // ⚠️ 不 Hook stat/access/fopen/getenv：
 // 在 rootless 越狱环境中，libsandy 已 Hook 这些函数用于
@@ -15,6 +17,7 @@
 #import <substrate.h>
 #import <sys/sysctl.h>
 #import <string.h>
+#import <dlfcn.h>
 
 // ============================================================
 // 越狱进程名黑名单
@@ -70,6 +73,29 @@ static int hooked_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, 
 }
 
 // ============================================================
+// dyld_get_image_name Hook — 过滤加载的越狱 dylib 路径
+//
+// 微信可能遍历 dyld 加载的所有镜像，检查是否包含
+// substitute/libhooker/substrate 等越狱框架。
+// 返回安全的系统库路径替代越狱 dylib 路径。
+// ============================================================
+static const char* (*original_dyld_get_image_name)(uint32_t image_index);
+
+static const char* hooked_dyld_get_image_name(uint32_t image_index) {
+    const char* name = original_dyld_get_image_name(image_index);
+    if (name) {
+        if (strstr(name, "substitute") ||
+            strstr(name, "libhooker") ||
+            strstr(name, "Substrate") ||
+            strstr(name, "substrate") ||
+            strstr(name, "dk.dylib")) {
+            return "/usr/lib/system/libsystem_kernel.dylib";
+        }
+    }
+    return name;
+}
+
+// ============================================================
 // DKWeChatAntiDetect 实现
 // ============================================================
 @implementation DKWeChatAntiDetect
@@ -82,15 +108,28 @@ static int hooked_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, 
 }
 
 - (void)install {
-    NSLog(@"[DK] 🔐 安装微信越狱检测绕过（sysctl 进程过滤）");
+    NSLog(@"[DK] 🔐 安装微信越狱检测绕过（sysctl 进程过滤 + dyld 镜像过滤）");
+
+    // iOS 17+ 启用 W^X 内存保护，MSHookFunction 修改代码页可能触发
+    // KERN_PROTECTION_FAILURE。在此情况下跳过 C 层 Hook，
+    // 越狱检测绕过由 ObjC 层 (DKWeChatJailBreakHook) 覆盖。
+    if (@available(iOS 17.0, *)) {
+        NSOperatingSystemVersion version = [[NSProcessInfo processInfo] operatingSystemVersion];
+        if (version.majorVersion >= 17) {
+            NSLog(@"[DK] ⚠️ iOS %ld 检测到 W^X 保护，跳过 C 层 Hook，依赖 ObjC 层绕过",
+                  (long)version.majorVersion);
+            return;
+        }
+    }
 
     // 使用 MSHookFunction 替代 fishhook：
     // fishhook 的 rebind_symbols 是全局符号重绑定，会覆盖其他插件的 Hook 链，
     // 导致其他插件 Hook 失效。MSHookFunction 是 Cydia Substrate 的 Hook 机制，
     // 原生支持 Hook 链，多个插件 Hook 同一函数时各层都会被正确调用。
     MSHookFunction((void *)sysctl, (void *)hooked_sysctl, (void **)&original_sysctl);
+    MSHookFunction((void *)dyld_get_image_name, (void *)hooked_dyld_get_image_name, (void **)&original_dyld_get_image_name);
 
-    NSLog(@"[DK] ✅ 微信越狱检测绕过已安装（1 个 C 函数：sysctl，MSHookFunction）");
+    NSLog(@"[DK] ✅ 微信越狱检测绕过已安装（2 个 C 函数：sysctl + dyld_get_image_name，MSHookFunction）");
 }
 
 @end

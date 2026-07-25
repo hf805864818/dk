@@ -8,6 +8,11 @@
 
 extern NSString* DKGetVersion(void);
 
+// 微信进程判断：微信中敏感词过滤无意义，隐藏相关菜单项
+static BOOL DKIsWeChatBundle(void) {
+    return [[[NSBundle mainBundle] bundleIdentifier] isEqualToString:@"com.tencent.xin"];
+}
+
 // ============================================================
 // UI 常量
 // ============================================================
@@ -568,7 +573,9 @@ static char kDKBadgeLabelKey;
         
         BOOL filterEnabled = [DKContentFilterBypass sharedInstance].enabled;
         NSString *filterLabel = filterEnabled ? @"🔒 敏感词过滤: 开" : @"🔓 敏感词过滤: 关";
-        [menuItems addObject:filterLabel];
+        if (!DKIsWeChatBundle()) {
+            [menuItems addObject:filterLabel];
+        }
 
         [menuItems addObject:@"🧹 清理多开数据"];
         [menuItems addObject:@"📋 查看日志"];
@@ -757,8 +764,10 @@ static char kDKBadgeLabelKey;
     [self hideAccountMenu];
     
     NSArray *accounts = [[DKAccountManager sharedManager] allAccountNames];
-    // 0: add, 1: default, 2..N+1: accounts, N+2: filter, N+3: clear, N+4: logs, N+5: version, N+6: hide
-    NSInteger totalItems = 1 + 1 + accounts.count + 5;
+    // 0: add, 1: default, 2..N+1: accounts, (TRAE: N+2: filter), N+2/3: clear, N+3/4: logs, N+4/5: version, N+5/6: hide
+    BOOL isWeChat = DKIsWeChatBundle();
+    NSInteger trailingItems = isWeChat ? 4 : 5; // 微信中无 filter 项
+    NSInteger totalItems = 1 + 1 + accounts.count + trailingItems;
     
     if (index == 0) {
         [self _promptAddAccount];
@@ -790,7 +799,7 @@ static char kDKBadgeLabelKey;
         [self _showLogViewer];
     } else if (index == totalItems - 4) {
         [self _promptClearMultiAccountData];
-    } else if (index == totalItems - 5) {
+    } else if (!isWeChat && index == totalItems - 5) {
         [self _toggleContentFilter];
     } else {
         NSInteger accountIndex = index - 2;

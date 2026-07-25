@@ -51,18 +51,7 @@ static BOOL hooked_isJailbroken(id self, SEL _cmd) {
 }
 
 // ============================================================
-// Hook 2: 设备信息检测 — 可能包含越狱检测
-// ============================================================
-
-static BOOL (*original_deviceIsJailbroken)(id self, SEL _cmd);
-
-static BOOL hooked_deviceIsJailbroken(id self, SEL _cmd) {
-    NSLog(@"[DK] 🛡️ deviceIsJailbroken 被调用 → 返回 NO");
-    return NO;
-}
-
-// ============================================================
-// Hook 3: 文件检测返回 — 可能返回越狱文件路径
+// Hook 2: 文件检测返回 — 可能返回越狱文件路径
 // ============================================================
 
 static id (*original_checkJailbreak)(id self, SEL _cmd);
@@ -215,6 +204,20 @@ static BOOL hooked_isJailbreakDylibLoaded(id self, SEL _cmd) {
     for (NSString *className in dylibCheckClasses) {
         for (NSString *selName in dylibCheckSelectors) {
             DKSafeHook(className, selName, (IMP)hooked_isJailbreakDylibLoaded, (IMP *)&original_isJailbreakDylibLoaded);
+        }
+    }
+
+    // === Tweak 注入检测（微信可能检测是否有 Substrate/Substitute 加载） ===
+    NSArray *tweakCheckClasses = @[
+        @"CUtility", @"WCUtility", @"MMUtility",
+        @"WCSecurityManager", @"SecurityManager",
+    ];
+    NSArray *tweakCheckSelectors = @[
+        @"hasTweakInjected", @"isTweakInjected",
+    ];
+    for (NSString *className in tweakCheckClasses) {
+        for (NSString *selName in tweakCheckSelectors) {
+            DKSafeHook(className, selName, (IMP)hooked_hasTweakInjected, (IMP *)&original_hasTweakInjected);
         }
     }
 
