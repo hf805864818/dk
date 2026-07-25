@@ -195,7 +195,13 @@ static BOOL hooked_isJailbreakDylibLoaded(id self, SEL _cmd) {
     }
 
     // === URL Scheme 检测 ===
-    DKSafeHook(@"UIApplication", @"canOpenURL:", (IMP)hooked_canOpenURLForJailbreak, (IMP *)&original_canOpenURLForJailbreak);
+    // ⚠️ 已移除 UIApplication canOpenURL: Hook。
+    // 原因：微信人脸认证使用内部 URL Scheme 进行摄像头/活体检测通信，
+    // MSHookMessageEx 对 canOpenURL: 的 Hook 与 Logos 的 UIApplication
+    // %hook 块形成 Hook 链冲突，主线程触发 SIGBUS (KERN_PROTECTION_FAILURE)。
+    // URL Scheme 级越狱检测已由 sysctl 进程过滤和 isJailbroken 方法 Hook 覆盖，
+    // 移除此 Hook 不会降低防检测效果。
+    // DKSafeHook(@"UIApplication", @"canOpenURL:", (IMP)hooked_canOpenURLForJailbreak, (IMP *)&original_canOpenURLForJailbreak);
 
     // === 动态库检测 ===
     NSArray *dylibCheckClasses = @[

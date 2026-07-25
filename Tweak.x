@@ -980,8 +980,16 @@ didReceiveNotificationResponse:(UNNotificationResponse *)response
 %hook NSURLSession
 
 // Layer 1: completionHandler 路径（保留原有逻辑）
+// ⚠️ 微信模式下跳过敏感词过滤：DKContentFilterBypass 未在微信中初始化，
+// 且人脸认证等关键网络请求不应被包装处理。
 - (NSURLSessionDataTask *)dataTaskWithRequest:(NSURLRequest *)request
                             completionHandler:(void (^)(NSData *data, NSURLResponse *response, NSError *error))completionHandler {
+
+    // 微信模式：直接透传，不包装 completionHandler
+    NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
+    if ([bundleID isEqualToString:@"com.tencent.xin"]) {
+        return %orig;
+    }
 
     void (^wrappedHandler)(NSData *, NSURLResponse *, NSError *) = nil;
 
@@ -997,6 +1005,12 @@ didReceiveNotificationResponse:(UNNotificationResponse *)response
 
 - (NSURLSessionDataTask *)dataTaskWithURL:(NSURL *)url
                         completionHandler:(void (^)(NSData *data, NSURLResponse *response, NSError *error))completionHandler {
+
+    // 微信模式：直接透传
+    NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
+    if ([bundleID isEqualToString:@"com.tencent.xin"]) {
+        return %orig;
+    }
 
     void (^wrappedHandler)(NSData *, NSURLResponse *, NSError *) = nil;
 
@@ -1018,6 +1032,11 @@ didReceiveNotificationResponse:(UNNotificationResponse *)response
 }
 
 - (NSURLSessionUploadTask *)uploadTaskWithRequest:(NSURLRequest *)request fromFile:(NSURL *)fileURL completionHandler:(void (^)(NSData *data, NSURLResponse *response, NSError *error))completionHandler {
+    // 微信模式：直接透传，但保留文件路径重映射
+    NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
+    if ([bundleID isEqualToString:@"com.tencent.xin"]) {
+        return %orig(request, DKRemapFileURL(fileURL), completionHandler);
+    }
     void (^wrappedHandler)(NSData *, NSURLResponse *, NSError *) = nil;
     if (completionHandler) {
         wrappedHandler = ^(NSData *data, NSURLResponse *response, NSError *error) {
@@ -1037,6 +1056,11 @@ didReceiveNotificationResponse:(UNNotificationResponse *)response
 }
 
 - (NSURLSessionUploadTask *)uploadTaskWithRequest:(NSURLRequest *)request fromData:(NSData *)bodyData completionHandler:(void (^)(NSData *data, NSURLResponse *response, NSError *error))completionHandler {
+    // 微信模式：直接透传
+    NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
+    if ([bundleID isEqualToString:@"com.tencent.xin"]) {
+        return %orig(request, bodyData, completionHandler);
+    }
     void (^wrappedHandler)(NSData *, NSURLResponse *, NSError *) = nil;
     if (completionHandler) {
         wrappedHandler = ^(NSData *data, NSURLResponse *response, NSError *error) {
@@ -1412,6 +1436,28 @@ static id hooked_sessionWithConfig(Class cls, SEL sel, NSURLSessionConfiguration
                 }
 
                 NSLog(@"[DK] ✅ 所有模块初始化完成 (%@)", isWeChat ? @"微信" : @"TRAE");
+
+                // ============================================
+                // 崩溃恢复：子账号无有效会话时自动显示悬浮按钮
+                //
+                // 场景：切到子账号 → 人脸认证闪退 → 重启后子账号
+                // 无任何登录数据，用户被困在登录页无法切回默认账号。
+                //
+                // 检测：子账号的 NSUserDefaults 隔离 plist 为空
+                // （新账号从未成功登录过），自动显示悬浮按钮。
+                // ============================================
+                if (isNonDefaultAccount) {
+                    NSDictionary *accountDefaults = DKReadAccountUserDefaultsDictionary();
+                    BOOL hasSessionData = accountDefaults && accountDefaults.count > 0;
+                    if (!hasSessionData) {
+                        NSLog(@"[DK] ⚠️ 子账号「%@」无有效会话数据（NSUserDefaults plist 为空），"
+                              "自动显示悬浮按钮以便切回默认账号", currentAccount);
+                        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
+                                       dispatch_get_main_queue(), ^{
+                            [[DKAccountUI sharedInstance] showFloatingButton];
+                        });
+                    }
+                }
             });
         });
     }
@@ -1594,6 +1640,24 @@ static int hooked_ftruncate(int fd, off_t length) {
 // 使用 fishhook rebind_symbols 重定向符号指针（不修改 __TEXT 代码页）
 // ============================================================
 
+/// 判断 Keychain 查询是否应该跳过 Hook。
+/// 只对 kSecClassGenericPassword / kSecClassInternetPassword 做前缀隔离，
+/// Certificate、Key、Identity 等类型直接透传。
+/// 原因：人脸认证 SDK 使用 kSecClassKey / kSecClassIdentity 存储
+/// 生物识别凭证，前缀修改会破坏其内部二进制数据格式，导致
+/// 主线程 SIGBUS (KERN_PROTECTION_FAILURE) 闪退。
+static BOOL DKShouldSkipKeychainHook(CFDictionaryRef query) {
+    NSDictionary *nsQuery = (__bridge NSDictionary *)query;
+    id secClass = nsQuery[(__bridge id)kSecClass];
+    if (!secClass) return NO; // 未指定 class，不跳过
+
+    if ([(__bridge id)kSecClassGenericPassword isEqual:secClass]) return NO;
+    if ([(__bridge id)kSecClassInternetPassword isEqual:secClass]) return NO;
+
+    // Certificate / Key / Identity → 跳过 Hook，直接透传
+    return YES;
+}
+
 static BOOL DKIsNonDefaultKeychainAccount(void) {
     DKAccountManager *manager = [DKAccountManager sharedManager];
     NSString *currentAccount = [manager currentAccountName];
@@ -1645,6 +1709,7 @@ static id DKKeychainProjectedResultForOriginalQuery(NSDictionary *originalQuery,
 
 static OSStatus hooked_SecItemAdd(CFDictionaryRef query, CFTypeRef *result) {
     if (DKShouldUseOriginalCFPreferences()) return original_SecItemAdd(query, result);
+    if (DKShouldSkipKeychainHook(query)) return original_SecItemAdd(query, result);
     NSDictionary *nsQuery = (__bridge NSDictionary *)query;
     NSDictionary *scopedQuery = DKKeychainQueryWithSyntheticScopeIfNeeded(nsQuery);
     NSDictionary *mappedQuery = DKRemapKeychainQuery(scopedQuery);
@@ -1653,6 +1718,7 @@ static OSStatus hooked_SecItemAdd(CFDictionaryRef query, CFTypeRef *result) {
 
 static OSStatus hooked_SecItemCopyMatching(CFDictionaryRef query, CFTypeRef *result) {
     if (DKShouldUseOriginalCFPreferences()) return original_SecItemCopyMatching(query, result);
+    if (DKShouldSkipKeychainHook(query)) return original_SecItemCopyMatching(query, result);
     NSDictionary *nsQuery = (__bridge NSDictionary *)query;
 
     // 非默认账号的宽查询必须特殊处理。
@@ -1748,6 +1814,7 @@ static OSStatus hooked_SecItemCopyMatching(CFDictionaryRef query, CFTypeRef *res
 
 static OSStatus hooked_SecItemUpdate(CFDictionaryRef query, CFDictionaryRef attributesToUpdate) {
     if (DKShouldUseOriginalCFPreferences()) return original_SecItemUpdate(query, attributesToUpdate);
+    if (DKShouldSkipKeychainHook(query)) return original_SecItemUpdate(query, attributesToUpdate);
     NSDictionary *nsQuery = (__bridge NSDictionary *)query;
     NSDictionary *scopedQuery = DKKeychainQueryWithSyntheticScopeIfNeeded(nsQuery);
     NSDictionary *mappedQuery = DKRemapKeychainQuery(scopedQuery);
@@ -1759,6 +1826,7 @@ static OSStatus hooked_SecItemUpdate(CFDictionaryRef query, CFDictionaryRef attr
 
 static OSStatus hooked_SecItemDelete(CFDictionaryRef query) {
     if (DKShouldUseOriginalCFPreferences()) return original_SecItemDelete(query);
+    if (DKShouldSkipKeychainHook(query)) return original_SecItemDelete(query);
     NSDictionary *nsQuery = (__bridge NSDictionary *)query;
     if (DKIsNonDefaultKeychainAccount()) {
         // 非默认账号：检查删除操作是否有可能误删其他账号的 Keychain 项。
