@@ -49,7 +49,71 @@ static NSString* DKMapPath(NSString *originalPath) {
 // 声明外部启动保护函数（定义在 Tweak.x 中）
 extern BOOL DKIsStartupGuardActive(void);
 
+// ============================================================
+// 微信越狱路径检测绕过
+// 微信通过 NSFileManager 直接检查越狱文件/目录是否存在。
+// 当检测到越狱路径时，返回一个确定不存在的路径，
+// 使 fileExistsAtPath: 等方法返回 NO。
+// ============================================================
+static BOOL DKIsJailbreakFilePath(NSString *path) {
+    if (!path) return NO;
+    static NSSet *jailbreakPaths = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        jailbreakPaths = [NSSet setWithArray:@[
+            @"/Applications/Cydia.app",
+            @"/Applications/Sileo.app",
+            @"/Applications/Zebra.app",
+            @"/var/jb",
+            @"/var/lib/apt",
+            @"/var/lib/dpkg",
+            @"/var/cache/apt",
+            @"/var/log/apt",
+            @"/usr/lib/libsubstitute.dylib",
+            @"/usr/lib/libsubstrate.dylib",
+            @"/usr/lib/libhooker.dylib",
+            @"/usr/lib/TweakInject",
+            @"/usr/libexec/ssh-keysign",
+            @"/usr/sbin/sshd",
+            @"/usr/bin/sshd",
+            @"/Library/MobileSubstrate",
+            @"/Library/PreferenceBundles",
+            @"/etc/apt",
+            @"/bin/bash",
+            @"/.installed_unc0ver",
+            @"/.bootstrapped",
+            @"/.procursus_strapped",
+            @"/private/var/jb",
+            @"/private/etc/apt",
+            @"/private/var/lib/apt",
+        ]];
+    });
+    // 精确匹配或前缀匹配（目录下的子文件也隐藏）
+    for (NSString *jbPath in jailbreakPaths) {
+        if ([path isEqualToString:jbPath]) return YES;
+        if ([path hasPrefix:[jbPath stringByAppendingString:@"/"]]) return YES;
+    }
+    return NO;
+}
+
+static BOOL DKIsWeChatFileManager(void) {
+    static BOOL checked = NO;
+    static BOOL isWeChat = NO;
+    if (!checked) {
+        isWeChat = [[[NSBundle mainBundle] bundleIdentifier] isEqualToString:@"com.tencent.xin"];
+        checked = YES;
+    }
+    return isWeChat;
+}
+
 NSString* DKRemapFilePath(NSString *path) {
+    if (!path) return nil;
+
+    // 微信：隐藏越狱文件路径，使 fileExistsAtPath: 返回 NO
+    if (DKIsWeChatFileManager() && DKIsJailbreakFilePath(path)) {
+        return @"/.nonexistent_jb_path_dk";
+    }
+
     if (DKIsStartupGuardActive()) return path;
     DKAccountManager *manager = [DKAccountManager sharedManager];
     if (manager.isSwitching) return path;

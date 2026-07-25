@@ -119,6 +119,23 @@ static BOOL hooked_isJailbreakDylibLoaded(id self, SEL _cmd) {
 }
 
 // ============================================================
+// Hook 8: 系统环境异常检测 — 微信新版可能使用的方法名
+// 对应截图中的 "系统环境可能存在异常" 弹窗
+// ============================================================
+
+static BOOL (*original_isSystemEnvAbnormal)(id self, SEL _cmd);
+
+static BOOL hooked_isSystemEnvAbnormal(id self, SEL _cmd) {
+    return NO;
+}
+
+static id (*original_checkSystemEnvironment)(id self, SEL _cmd);
+
+static id hooked_checkSystemEnvironment(id self, SEL _cmd) {
+    return nil;
+}
+
+// ============================================================
 // DKWeChatJailBreakHook 实现
 // ============================================================
 @implementation DKWeChatJailBreakHook
@@ -224,6 +241,42 @@ static BOOL hooked_isJailbreakDylibLoaded(id self, SEL _cmd) {
     // === 文件检测返回 ===
     DKSafeHook(@"CUtility", @"checkJailbreakFiles", (IMP)hooked_checkJailbreak, (IMP *)&original_checkJailbreak);
     DKSafeHook(@"WCUtility", @"checkJailbreakFiles", (IMP)hooked_checkJailbreak, (IMP *)&original_checkJailbreak);
+
+    // === 系统环境异常检测（微信新版安全检测方法） ===
+    NSArray *envCheckClasses = @[
+        @"CUtility", @"WCUtility", @"MMUtility",
+        @"WCSecurityManager", @"SecurityManager",
+        @"WCSecurityLogic", @"MMSecurityCheck",
+        @"WCAccountSafetyMgr", @"WCSafetyMgr",
+        @"WCRiskManager", @"MMRiskManager",
+        @"WCDeviceCheck", @"MMDeviceCheck",
+    ];
+    NSArray *envCheckSelectors = @[
+        @"isSystemEnvironmentAbnormal", @"isSystemEnvAbnormal",
+        @"checkSystemEnvironment", @"checkEnvironment",
+        @"isDeviceCompromised", @"checkDeviceSecurity",
+        @"hasSecurityRisk", @"checkSecurityRisk",
+        @"isAbnormalEnvironment", @"checkAbnormalEnv",
+        @"isRiskEnvironment", @"isEnvRisk",
+    ];
+    for (NSString *className in envCheckClasses) {
+        for (NSString *selName in envCheckSelectors) {
+            DKSafeHook(className, selName, (IMP)hooked_isSystemEnvAbnormal, (IMP *)&original_isSystemEnvAbnormal);
+        }
+    }
+
+    // === checkSystemEnvironment 返回 nil 的变体 ===
+    NSArray *envCheckClasses2 = @[
+        @"CUtility", @"WCUtility", @"MMUtility",
+        @"WCSecurityManager", @"SecurityManager",
+        @"WCSecurityLogic", @"MMSecurityCheck",
+    ];
+    for (NSString *className in envCheckClasses2) {
+        DKSafeHook(className, @"checkSystemEnvironment", (IMP)hooked_checkSystemEnvironment, (IMP *)&original_checkSystemEnvironment);
+        DKSafeHook(className, @"checkEnvironment", (IMP)hooked_checkSystemEnvironment, (IMP *)&original_checkSystemEnvironment);
+        DKSafeHook(className, @"getSecurityRiskInfo", (IMP)hooked_checkSystemEnvironment, (IMP *)&original_checkSystemEnvironment);
+        DKSafeHook(className, @"getAbnormalEnvInfo", (IMP)hooked_checkSystemEnvironment, (IMP *)&original_checkSystemEnvironment);
+    }
 
     NSLog(@"[DK] ✅ 微信越狱检测绕过已安装（ObjC 层）");
 }

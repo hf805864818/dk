@@ -2,15 +2,11 @@
 // DKWeChatAntiDetect.m — 微信 C 层越狱检测绕过
 //
 // 策略：
-//   1. 过滤进程列表中的越狱进程名（sysctl）
-//   2. 过滤 dyld 镜像列表中的越狱 dylib 路径（dyld_get_image_name）
+//   1. 阻止 fork() 子进程检测（微信核心绕过手段）
+//   2. 过滤进程列表中的越狱进程名（sysctl）
+//   3. 过滤 dyld 镜像列表中的越狱 dylib 路径（dyld_get_image_name）
 //
-// ⚠️ 不 Hook stat/access/fopen/getenv：
-// 在 rootless 越狱环境中，libsandy 已 Hook 这些函数用于
-// 路径重映射（/var/jb/...）。如果我们再 Hook 同一批函数，
-// 会与 libsandy 的路径解析冲突，导致 SIGABRT 闪退。
-//
-// 文件/路径级别的越狱检测由 ObjC 层 Hook 覆盖。
+// 文件/路径级别的越狱检测由 DKFileManagerHook 的路径过滤覆盖。
 // ============================================================
 
 #import "DKWeChatAntiDetect.h"
@@ -18,6 +14,8 @@
 #import <sys/sysctl.h>
 #import <string.h>
 #import <dlfcn.h>
+#import <unistd.h>
+#import <errno.h>
 
 // ============================================================
 // 越狱进程名黑名单
@@ -96,6 +94,23 @@ static const char* hooked_dyld_get_image_name(uint32_t image_index) {
 }
 
 // ============================================================
+// fork Hook — 阻止微信通过 fork() 创建子进程检测越狱
+//
+// 微信已知会使用 fork() 创建子进程来检测越狱环境。
+// fork() 创建的子进程不继承父进程的内存 Hook
+// （dyld_get_image_name / sysctl 等），因此子进程可以
+// 直接检测到越狱文件/进程/dylib。
+// 返回 -1 (失败) 并设置 errno = EPERM，彻底阻断此检测路径。
+// ============================================================
+static pid_t (*original_fork)(void);
+
+static pid_t hooked_fork(void) {
+    NSLog(@"[DK] 🛡️ fork() 被调用 → 返回 -1（阻止子进程检测）");
+    errno = EPERM;
+    return -1;
+}
+
+// ============================================================
 // DKWeChatAntiDetect 实现
 // ============================================================
 @implementation DKWeChatAntiDetect
@@ -128,8 +143,9 @@ static const char* hooked_dyld_get_image_name(uint32_t image_index) {
     // 原生支持 Hook 链，多个插件 Hook 同一函数时各层都会被正确调用。
     MSHookFunction((void *)sysctl, (void *)hooked_sysctl, (void **)&original_sysctl);
     MSHookFunction((void *)dyld_get_image_name, (void *)hooked_dyld_get_image_name, (void **)&original_dyld_get_image_name);
+    MSHookFunction((void *)fork, (void *)hooked_fork, (void **)&original_fork);
 
-    NSLog(@"[DK] ✅ 微信越狱检测绕过已安装（2 个 C 函数：sysctl + dyld_get_image_name，MSHookFunction）");
+    NSLog(@"[DK] ✅ 微信越狱检测绕过已安装（3 个 C 函数：sysctl + dyld_get_image_name + fork，MSHookFunction）");
 }
 
 @end
