@@ -1157,19 +1157,17 @@ static id hooked_sessionWithConfig(Class cls, SEL sel, NSURLSessionConfiguration
 %ctor {
     @autoreleasepool {
         NSString *bundleID = DKGetCurrentBundleID();
+        BOOL isWeChat = [bundleID isEqualToString:@"com.tencent.xin"];
 
         // ============================================================
-        // 微信专属：越狱检测绕过 + 防检测（早期返回）
-        //
-        // 微信不需要 TRAE 的多账号切换、数据隔离、悬浮按钮等功能。
-        // 在 %ctor 最顶部判断，微信进程只安装防检测后直接返回，
-        // 跳过下方所有 TRAE 逻辑。
+        // 微信专属：越狱检测绕过 + 防检测
+        // 必须在所有其他 Hook 之前安装，防止微信检测到越狱后主动退出。
+        // 但与之前不同：不再 return！微信也需要完整的多账号功能。
         // ============================================================
-        if ([bundleID isEqualToString:@"com.tencent.xin"]) {
+        if (isWeChat) {
             NSLog(@"[DK] 🔐 检测到微信，安装越狱检测绕过...");
             [[DKWeChatAntiDetect sharedInstance] install];
             [[DKWeChatJailBreakHook sharedInstance] install];
-            return;
         }
 
         // ============================================================
@@ -1188,7 +1186,7 @@ static id hooked_sessionWithConfig(Class cls, SEL sel, NSURLSessionConfiguration
         NSLog(@"========================================");
         NSLog(@"[DK] DK Multi-Account Tweak v%@ 已加载", DK_VERSION);
         NSLog(@"[DK] 构建时间: %@", DK_BUILD_TIME);
-        NSLog(@"[DK] 当前应用: %@", bundleID);
+        NSLog(@"[DK] 当前应用: %@%@", bundleID, isWeChat ? @" (微信)" : @"");
         NSLog(@"========================================");
 
         // ============================================
@@ -1257,58 +1255,87 @@ static id hooked_sessionWithConfig(Class cls, SEL sel, NSURLSessionConfiguration
         // 此时 _dkStartupGuard = YES，Hook 暂时透传
         // ============================================
         %init(TRAE);
-        NSLog(@"[DK] Logos Hook 已安装（TRAE 多账号隔离）");
+        NSLog(@"[DK] Logos Hook 已安装（%@ 多账号隔离）", isWeChat ? @"微信" : @"TRAE");
 
         // ============================================
         // 第二步：安装 C 函数 Hook（fishhook rebind_symbols）
-        // 同样必须在 App 初始化前安装
+        //
+        // TRAE：安装全部 30 个 Hook（Keychain + CFPreferences + POSIX + mmap）
+        // 微信：仅安装 Keychain + CFPreferences（13 个），跳过 POSIX + mmap
+        //
+        // 原因：在 rootless 越狱环境中，libsandy 已 Hook open/stat/access/
+        // fopen 等函数用于路径重映射。微信中再 Hook 同一批函数会导致
+        // 与 libsandy 的 Hook 链冲突，可能引发 SIGABRT 闪退。
+        //
+        // 微信的文件隔离依赖 DKAppDataManager 的目录级搬移（rename）
+        // 而非 POSIX 文件级 Hook，同样能保证多账号数据隔离。
         // ============================================
-        static struct rebinding rebindings[] = {
-            // Keychain（4 个）
-            {"SecItemAdd",            hooked_SecItemAdd,            (void **)&original_SecItemAdd},
-            {"SecItemCopyMatching",   hooked_SecItemCopyMatching,   (void **)&original_SecItemCopyMatching},
-            {"SecItemUpdate",         hooked_SecItemUpdate,         (void **)&original_SecItemUpdate},
-            {"SecItemDelete",         hooked_SecItemDelete,         (void **)&original_SecItemDelete},
-            // CFPreferences（3 个 App 版本 + 6 个非 App 版本 = 9 个）
-            {"CFPreferencesSetAppValue",    hooked_CFPreferencesSetAppValue,    (void **)&original_CFPreferencesSetAppValue},
-            {"CFPreferencesCopyAppValue",   hooked_CFPreferencesCopyAppValue,   (void **)&original_CFPreferencesCopyAppValue},
-            {"CFPreferencesAppSynchronize", hooked_CFPreferencesAppSynchronize, (void **)&original_CFPreferencesAppSynchronize},
-            {"CFPreferencesSetValue",       hooked_CFPreferencesSetValue,       (void **)&original_CFPreferencesSetValue},
-            {"CFPreferencesCopyValue",      hooked_CFPreferencesCopyValue,      (void **)&original_CFPreferencesCopyValue},
-            {"CFPreferencesSynchronize",    hooked_CFPreferencesSynchronize,    (void **)&original_CFPreferencesSynchronize},
-            {"CFPreferencesCopyKeyList",    hooked_CFPreferencesCopyKeyList,    (void **)&original_CFPreferencesCopyKeyList},
-            {"CFPreferencesSetMultiple",    hooked_CFPreferencesSetMultiple,    (void **)&original_CFPreferencesSetMultiple},
-            {"CFPreferencesCopyMultiple",   hooked_CFPreferencesCopyMultiple,   (void **)&original_CFPreferencesCopyMultiple},
-            // POSIX 文件操作（11 个）— 拦截 MMKV/WCDB 等 C/C++ 库的直接文件 I/O
-            {"open",    hooked_open,    (void **)&original_open},
-            {"openat",  hooked_openat,  (void **)&original_openat},
-            {"stat",    hooked_stat,    (void **)&original_stat},
-            {"lstat",   hooked_lstat,   (void **)&original_lstat},
-            {"access",  hooked_access,  (void **)&original_access},
-            {"fopen",   hooked_fopen,   (void **)&original_fopen},
-            {"unlink",  hooked_unlink,  (void **)&original_unlink},
-            {"unlinkat",hooked_unlinkat,(void **)&original_unlinkat},
-            {"rename",  hooked_rename,  (void **)&original_rename},
-            {"mkdir",   hooked_mkdir,   (void **)&original_mkdir},
-            {"mkdirat", hooked_mkdirat, (void **)&original_mkdirat},
-            {"write",   hooked_write,   (void **)&original_write},
-            {"read",    hooked_read,    (void **)&original_read},
-            // mmap 系列（4 个）— 拦截 MMKV 内存映射操作
-            {"mmap",    hooked_mmap,    (void **)&original_mmap},
-            {"msync",   hooked_msync,   (void **)&original_msync},
-            {"munmap",  hooked_munmap,  (void **)&original_munmap},
-            {"ftruncate", hooked_ftruncate, (void **)&original_ftruncate},
-        };
-        // 30 个 Hook：Keychain 4 + CFPreferences 9 + POSIX 13 + mmap 4
-        rebind_symbols(rebindings, 30);
-        NSLog(@"[DK] fishhook C 函数 Hook 已安装（30 个：Keychain 4 + CFPreferences 9 + POSIX 13 + mmap 4）");
+        if (!isWeChat) {
+            // TRAE：完整 Hook 集
+            static struct rebinding rebindings[] = {
+                // Keychain（4 个）
+                {"SecItemAdd",            hooked_SecItemAdd,            (void **)&original_SecItemAdd},
+                {"SecItemCopyMatching",   hooked_SecItemCopyMatching,   (void **)&original_SecItemCopyMatching},
+                {"SecItemUpdate",         hooked_SecItemUpdate,         (void **)&original_SecItemUpdate},
+                {"SecItemDelete",         hooked_SecItemDelete,         (void **)&original_SecItemDelete},
+                // CFPreferences（9 个）
+                {"CFPreferencesSetAppValue",    hooked_CFPreferencesSetAppValue,    (void **)&original_CFPreferencesSetAppValue},
+                {"CFPreferencesCopyAppValue",   hooked_CFPreferencesCopyAppValue,   (void **)&original_CFPreferencesCopyAppValue},
+                {"CFPreferencesAppSynchronize", hooked_CFPreferencesAppSynchronize, (void **)&original_CFPreferencesAppSynchronize},
+                {"CFPreferencesSetValue",       hooked_CFPreferencesSetValue,       (void **)&original_CFPreferencesSetValue},
+                {"CFPreferencesCopyValue",      hooked_CFPreferencesCopyValue,      (void **)&original_CFPreferencesCopyValue},
+                {"CFPreferencesSynchronize",    hooked_CFPreferencesSynchronize,    (void **)&original_CFPreferencesSynchronize},
+                {"CFPreferencesCopyKeyList",    hooked_CFPreferencesCopyKeyList,    (void **)&original_CFPreferencesCopyKeyList},
+                {"CFPreferencesSetMultiple",    hooked_CFPreferencesSetMultiple,    (void **)&original_CFPreferencesSetMultiple},
+                {"CFPreferencesCopyMultiple",   hooked_CFPreferencesCopyMultiple,   (void **)&original_CFPreferencesCopyMultiple},
+                // POSIX 文件操作（13 个）
+                {"open",    hooked_open,    (void **)&original_open},
+                {"openat",  hooked_openat,  (void **)&original_openat},
+                {"stat",    hooked_stat,    (void **)&original_stat},
+                {"lstat",   hooked_lstat,   (void **)&original_lstat},
+                {"access",  hooked_access,  (void **)&original_access},
+                {"fopen",   hooked_fopen,   (void **)&original_fopen},
+                {"unlink",  hooked_unlink,  (void **)&original_unlink},
+                {"unlinkat",hooked_unlinkat,(void **)&original_unlinkat},
+                {"rename",  hooked_rename,  (void **)&original_rename},
+                {"mkdir",   hooked_mkdir,   (void **)&original_mkdir},
+                {"mkdirat", hooked_mkdirat, (void **)&original_mkdirat},
+                {"write",   hooked_write,   (void **)&original_write},
+                {"read",    hooked_read,    (void **)&original_read},
+                // mmap 系列（4 个）
+                {"mmap",    hooked_mmap,    (void **)&original_mmap},
+                {"msync",   hooked_msync,   (void **)&original_msync},
+                {"munmap",  hooked_munmap,  (void **)&original_munmap},
+                {"ftruncate", hooked_ftruncate, (void **)&original_ftruncate},
+            };
+            rebind_symbols(rebindings, 30);
+            NSLog(@"[DK] fishhook C 函数 Hook 已安装（30 个：Keychain 4 + CFPreferences 9 + POSIX 13 + mmap 4）");
+        } else {
+            // 微信：仅 Keychain + CFPreferences，跳过 POSIX 和 mmap
+            static struct rebinding wechat_rebindings[] = {
+                {"SecItemAdd",            hooked_SecItemAdd,            (void **)&original_SecItemAdd},
+                {"SecItemCopyMatching",   hooked_SecItemCopyMatching,   (void **)&original_SecItemCopyMatching},
+                {"SecItemUpdate",         hooked_SecItemUpdate,         (void **)&original_SecItemUpdate},
+                {"SecItemDelete",         hooked_SecItemDelete,         (void **)&original_SecItemDelete},
+                {"CFPreferencesSetAppValue",    hooked_CFPreferencesSetAppValue,    (void **)&original_CFPreferencesSetAppValue},
+                {"CFPreferencesCopyAppValue",   hooked_CFPreferencesCopyAppValue,   (void **)&original_CFPreferencesCopyAppValue},
+                {"CFPreferencesAppSynchronize", hooked_CFPreferencesAppSynchronize, (void **)&original_CFPreferencesAppSynchronize},
+                {"CFPreferencesSetValue",       hooked_CFPreferencesSetValue,       (void **)&original_CFPreferencesSetValue},
+                {"CFPreferencesCopyValue",      hooked_CFPreferencesCopyValue,      (void **)&original_CFPreferencesCopyValue},
+                {"CFPreferencesSynchronize",    hooked_CFPreferencesSynchronize,    (void **)&original_CFPreferencesSynchronize},
+                {"CFPreferencesCopyKeyList",    hooked_CFPreferencesCopyKeyList,    (void **)&original_CFPreferencesCopyKeyList},
+                {"CFPreferencesSetMultiple",    hooked_CFPreferencesSetMultiple,    (void **)&original_CFPreferencesSetMultiple},
+                {"CFPreferencesCopyMultiple",   hooked_CFPreferencesCopyMultiple,   (void **)&original_CFPreferencesCopyMultiple},
+            };
+            rebind_symbols(wechat_rebindings, 13);
+            NSLog(@"[DK] fishhook C 函数 Hook 已安装（13 个：Keychain 4 + CFPreferences 9，跳过 POSIX/mmap）");
+        }
 
         // ============================================
-        // 第 2.5 步：Hook NSURLSession 类方法 — 代理注入（SSE 流式响应）
-        // 必须在 fishhook 之后、_dkStartupGuard 关闭之前安装，
-        // 确保 App 创建第一个 NSURLSession 之前代理已就位。
+        // 第 2.5 步：Hook NSURLSession 类方法 — 代理注入（仅 TRAE）
+        // 微信不需要 SSE 流式过滤和敏感词处理。
         // ============================================
-        {
+        if (!isWeChat) {
             Class sessionClass = objc_getClass("NSURLSession");
             if (sessionClass) {
                 MSHookMessageEx(object_getClass(sessionClass),
@@ -1360,37 +1387,31 @@ static id hooked_sessionWithConfig(Class cls, SEL sel, NSURLSessionConfiguration
         dispatch_async(dispatch_get_main_queue(), ^{
             static dispatch_once_t onceToken;
             dispatch_once(&onceToken, ^{
+                // === 通用模块（TRAE + 微信） ===
                 [[DKDataIsolation sharedInstance] setup];
                 [[DKUserDefaultsHook sharedInstance] install];
                 [[DKKeychainHook sharedInstance] install];
                 [[DKNetworkSessionManager sharedManager] setup];
                 [[DKPushNotificationBridge sharedInstance] setup];
-                [[DKContentFilterBypass sharedInstance] setup];
-                // DKFilterURLProtocol 已禁用：
-                // 注册自定义 NSURLProtocol 会导致系统 com.apple.CFNetwork.CustomProtocols
-                // 线程在处理认证挑战时调用 performDefaultHandlingForAuthenticationChallenge:，
-                // 该 selector 在 __NSCFURLLocalSessionConnection 上不存在，触发 SIGABRT 闪退。
-                // NSJSONSerialization hook 已能覆盖所有敏感词过滤场景，无需 URLProtocol。
-                // [DKFilterURLProtocol registerProtocol];
                 [[DKLogManager sharedInstance] startCapture];
-                [[DKAccountUI sharedInstance] setup];
+                [[DKAccountUI sharedInstance] setup];  // 悬浮按钮：微信中也会出现
 
-                // 启动会话定期刷新
-                [[DKNetworkSessionManager sharedManager] scheduleSessionRefresh];
+                if (!isWeChat) {
+                    // === TRAE 专属模块 ===
+                    [[DKContentFilterBypass sharedInstance] setup];
+                    [[DKNetworkSessionManager sharedManager] scheduleSessionRefresh];
 
-                // 启动时不主动快照默认账号。
-                // 会话快照在手动切换账号时（switchToAccount:）保存，
-                // 以及在进入后台/终止时自动保存。启动时快照可能因
-                // exit(0) 前 Cookie 未刷盘而覆盖正确的会话文件。
-                DKAccountManager *manager = [DKAccountManager sharedManager];
-                DKNetworkSessionManager *sessionManager = [DKNetworkSessionManager sharedManager];
-                if (![[manager currentAccountName] isEqualToString:[manager defaultAccountName]] &&
-                    ![sessionManager hasSessionSnapshotForAccount:[manager defaultAccountName]]) {
-                    NSLog(@"[DK] 当前为子账号 %@，默认账号暂无快照；切回默认并登录后会自动保存",
-                          [manager currentAccountName]);
+                    // 启动时不主动快照默认账号。
+                    DKAccountManager *manager = [DKAccountManager sharedManager];
+                    DKNetworkSessionManager *sessionManager = [DKNetworkSessionManager sharedManager];
+                    if (![[manager currentAccountName] isEqualToString:[manager defaultAccountName]] &&
+                        ![sessionManager hasSessionSnapshotForAccount:[manager defaultAccountName]]) {
+                        NSLog(@"[DK] 当前为子账号 %@，默认账号暂无快照；切回默认并登录后会自动保存",
+                              [manager currentAccountName]);
+                    }
                 }
 
-                NSLog(@"[DK] ✅ 所有模块初始化完成");
+                NSLog(@"[DK] ✅ 所有模块初始化完成 (%@)", isWeChat ? @"微信" : @"TRAE");
             });
         });
     }
