@@ -747,6 +747,11 @@ static NSString *const kDKLibraryOwnerFile = @".dk_library_owner";
                            attributes:@{NSFileProtectionKey: NSFileProtectionNone}
                                 error:nil];
         }
+
+        // 重新应用会话数据到沙盒（子账号的 Cookie + 隔离 plist 会话）
+        [[DKNetworkSessionManager sharedManager] restoreSessionForAccount:currentAccount
+                                                    clearSessionIfMissing:NO];
+        NSLog(@"[DK] 子账号「%@」会话已重新应用", currentAccount);
     }
 
     // Step 3: 写入所有权标记

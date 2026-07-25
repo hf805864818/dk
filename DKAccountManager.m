@@ -585,12 +585,20 @@ static NSString *_accountsRootPath = nil;
                 _currentAccountName = name;
                 [self _saveCurrentAccountToFile:name];
 
-                // 恢复目标账号的网络会话
+                // 恢复目标账号的 Keychain（仅默认账号需要）
+                // 注意：不在此处调用 restoreSessionForAccount。
+                //
+                // restoreSessionForAccount 会写入 UserDefaults / 隔离 plist，
+                // 但此时沙盒中仍是旧账号的数据（目录搬移在下次启动 %ctor 中完成）。
+                // 如果在此处写入目标账号的 UserDefaults，会污染旧账号的沙盒，
+                // 导致下次启动时 ensureDataOwnershipForAccount 把混合数据
+                // 保存到旧账号的隔离 plist，造成旧账号登录态丢失。
+                //
+                // 会话恢复统一在下次启动的 ensureDataOwnershipForAccount 中完成，
+                // 此时目录搬移已完成，沙盒中是目标账号的干净数据。
                 if ([name isEqualToString:kDKDefaultAccountName]) {
                     [[DKNetworkSessionManager sharedManager] restoreDefaultAccountKeychain];
                 }
-                [[DKNetworkSessionManager sharedManager] restoreSessionForAccount:name
-                                                            clearSessionIfMissing:switchingToDefaultWithoutSnapshot];
 
                 // 通知数据隔离层刷新
                 [[DKDataIsolation sharedInstance] setup];
