@@ -764,8 +764,23 @@ static char kDKBadgeLabelKey;
         [self _promptAddAccount];
     } else if (index == 1) {
         // 切换到默认账号（原始 TRAE 登录）
-        [[DKAccountManager sharedManager] switchToDefaultAccount];
-        [self _showToast:@"已切换到默认账号"];
+        BOOL switched = [[DKAccountManager sharedManager] switchToDefaultAccount];
+        if (switched) {
+            [self _showToast:@"已切换到默认账号"];
+        } else {
+            // switchToDefaultAccount 返回 NO 说明 _currentAccountName 已经是默认账号名，
+            // 但 UI 可能仍显示子账号登录页（上一次 exit(0) 未正常执行或状态异常）。
+            // 直接强制退出，下次启动时 %ctor 会通过 ensureDataOwnershipForAccount
+            // 恢复默认账号数据到沙盒，确保用户回到默认账号主界面。
+            NSLog(@"[DK] switchToDefaultAccount 返回 NO，当前 _currentAccountName=%@，强制重启恢复默认账号",
+                  [[DKAccountManager sharedManager] currentAccountName]);
+            [self _showToast:@"正在恢复默认账号..."];
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                sync();
+                exit(0);
+            });
+        }
     } else if (index == totalItems - 1) {
         [self hideFloatingButtonAnimated:YES];
         [self _showToast:@"悬浮按钮已隐藏，三指长按可重新呼出"];
@@ -781,8 +796,12 @@ static char kDKBadgeLabelKey;
         NSInteger accountIndex = index - 2;
         if (accountIndex < accounts.count) {
             NSString *accountName = accounts[accountIndex];
-            [[DKAccountManager sharedManager] switchToAccount:accountName];
-            [self _showToast:[NSString stringWithFormat:@"已切换到: %@", accountName]];
+            BOOL switched = [[DKAccountManager sharedManager] switchToAccount:accountName];
+            if (switched) {
+                [self _showToast:[NSString stringWithFormat:@"已切换到: %@", accountName]];
+            } else {
+                [self _showToast:[NSString stringWithFormat:@"当前已是: %@", accountName]];
+            }
         }
     }
 }
