@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.0.97] - 2026-07-25
+
+- cb9f0ed v1.0.96: 修复微信插件不显示 — 移除早期 return，微信走完整多账号初始化
+
+
 ## [1.0.96] - 2026-07-24
 
 - 00ec04b v1.0.95: 修复插件冲突 — fishhook→MSHookFunction + canOpenURL fallback 修正
