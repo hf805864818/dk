@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.0.102] - 2026-07-26
+
+- feat: 新增 5 个防封号关键 Hook — HasInstallJailbreakPlugin: / getJailbreakSuspiciousModules / BypassFileCheckB: / CheckAllVersion / _bypassWCFace
+- docs: 修正 DKWeChatAntiDetect.h 注释（fishhook → MSHookFunction）
+
 ## [1.0.100] - 2026-07-25
 
 - 6864a54 fix: 修复切换默认账号无响应问题 (v1.0.99)
