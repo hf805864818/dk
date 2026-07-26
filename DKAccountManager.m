@@ -176,6 +176,13 @@ static NSString *_accountsRootPath = nil;
     NSString *rootPath = self.accountsRootPath;
     NSLog(@"[DK] refreshAccountList: 根目录=%@", rootPath);
 
+    // 读取持久化账号列表作为权威来源，用于交叉校验
+    NSString *listPath = [rootPath stringByAppendingPathComponent:@".dk_accounts.plist"];
+    NSArray<NSString *> *savedList = [NSArray arrayWithContentsOfFile:listPath];
+    if (savedList.count > 0) {
+        NSLog(@"[DK] refreshAccountList: 持久化列表=%lu 个账号 (%@)", (unsigned long)savedList.count, [savedList componentsJoinedByString:@", "]);
+    }
+
     NSArray *contents = [fm contentsOfDirectoryAtPath:rootPath error:nil];
     NSLog(@"[DK] refreshAccountList: 目录内容=%lu 项", (unsigned long)contents.count);
 
@@ -215,6 +222,17 @@ static NSString *_accountsRootPath = nil;
             }
 
             if (hasMetadata) {
+                // 交叉校验：如果持久化列表存在但此目录不在其中，说明是残留旧目录
+                // （例如重命名时旧目录删除失败导致残留），需要自动清理
+                if (savedList.count > 0 && ![savedList containsObject:item]) {
+                    NSLog(@"[DK] 🧹 检测到残留目录（不在持久化列表中），自动清理: %@", item);
+                    NSError *cleanupError = nil;
+                    if (![fm removeItemAtPath:fullPath error:&cleanupError]) {
+                        NSLog(@"[DK] ⚠️ 清理残留目录失败: %@, error=%@", item, cleanupError);
+                    }
+                    continue; // 跳过，不加入列表
+                }
+
                 [_accountNames addObject:item];
                 NSDictionary *meta = [NSDictionary dictionaryWithContentsOfFile:metaPath];
                 if (meta) {
