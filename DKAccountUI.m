@@ -1240,6 +1240,7 @@ static char kDKBadgeLabelKey;
                 BOOL success = [[DKAccountManager sharedManager] renameAccount:accountName toName:newName];
                 if (success) {
                     [self _showToast:[NSString stringWithFormat:@"已重命名为: %@", newName]];
+                    [self refreshMenu];  // 立即刷新菜单，确保显示最新列表
                 } else {
                     [self _showToast:@"重命名失败，名称可能已存在或无效"];
                 }
