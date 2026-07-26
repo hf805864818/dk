@@ -142,7 +142,15 @@ static pid_t hooked_fork(void) {
     // 导致其他插件 Hook 失效。MSHookFunction 是 Cydia Substrate 的 Hook 机制，
     // 原生支持 Hook 链，多个插件 Hook 同一函数时各层都会被正确调用。
     MSHookFunction((void *)sysctl, (void *)hooked_sysctl, (void **)&original_sysctl);
-    MSHookFunction((void *)dyld_get_image_name, (void *)hooked_dyld_get_image_name, (void **)&original_dyld_get_image_name);
+
+    // dyld_get_image_name 在新版 SDK 中已被移除，使用 dlsym 动态获取
+    void *dyld_get_image_name_ptr = dlsym(RTLD_DEFAULT, "dyld_get_image_name");
+    if (dyld_get_image_name_ptr) {
+        MSHookFunction(dyld_get_image_name_ptr, (void *)hooked_dyld_get_image_name, (void **)&original_dyld_get_image_name);
+    } else {
+        NSLog(@"[DK] ⚠️ dyld_get_image_name 未找到，跳过 Hook");
+    }
+
     MSHookFunction((void *)fork, (void *)hooked_fork, (void **)&original_fork);
 
     NSLog(@"[DK] ✅ 微信越狱检测绕过已安装（3 个 C 函数：sysctl + dyld_get_image_name + fork，MSHookFunction）");
