@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.0.103] - 2026-07-26
+
+- feec706 fix: dyld_get_image_name 在新版SDK已移除，改用 dlsym 动态获取
+- 95946c7 feat: 新增5个防封号关键Hook — HasInstallJailbreakPlugin/getSuspiciousModules/FileCheck/VersionCheck/FaceBypass
+- a8564d2 chore: bump version to 1.0.102 — 新增5个防封号Hook + 修正注释
+- a9791d3 fix: 微信越狱检测绕过全面增强 (v1.0.101)
+- 780c73c fix: 微信多开全面修复 (v1.0.100)
+
+
 ## [1.0.102] - 2026-07-26
 
 - feat: 新增 5 个防封号关键 Hook — HasInstallJailbreakPlugin: / getJailbreakSuspiciousModules / BypassFileCheckB: / CheckAllVersion / _bypassWCFace
