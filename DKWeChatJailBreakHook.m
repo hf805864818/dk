@@ -136,6 +136,67 @@ static id hooked_checkSystemEnvironment(id self, SEL _cmd) {
 }
 
 // ============================================================
+// Hook 9: 越狱插件检测 — HasInstallJailbreakPlugin
+// 微信检测设备上是否安装了任何越狱插件（不限 DK）
+// ============================================================
+
+static BOOL (*original_HasInstallJailbreakPlugin)(id self, SEL _cmd);
+
+static BOOL hooked_HasInstallJailbreakPlugin(id self, SEL _cmd) {
+    NSLog(@"[DK] 🛡️ HasInstallJailbreakPlugin 被调用 → 返回 NO");
+    return NO;
+}
+
+// ============================================================
+// Hook 10: 可疑越狱模块检测 — getJailbreakSuspiciousModules
+// 微信新版主力检测手段，返回已加载的可疑越狱 dylib 列表
+// ============================================================
+
+static id (*original_getJailbreakSuspiciousModules)(id self, SEL _cmd);
+
+static id hooked_getJailbreakSuspiciousModules(id self, SEL _cmd) {
+    NSLog(@"[DK] 🛡️ getJailbreakSuspiciousModules 被调用 → 返回空数组");
+    return @[];
+}
+
+// ============================================================
+// Hook 11: 文件完整性检查绕过 — BypassFileCheckB:
+// 微信可能校验自身 dylib/二进制文件是否被篡改
+// ============================================================
+
+static void (*original_BypassFileCheckB)(id self, SEL _cmd, id arg);
+
+static void hooked_BypassFileCheckB(id self, SEL _cmd, id arg) {
+    NSLog(@"[DK] 🛡️ BypassFileCheckB: 被调用 → 跳过文件检查");
+    return;
+}
+
+// ============================================================
+// Hook 12: 版本检查绕过 — CheckAllVersion
+// 微信可能检测客户端版本号是否官方，暴露 DK 插件信息
+// ============================================================
+
+static id (*original_CheckAllVersion)(id self, SEL _cmd);
+
+static id hooked_CheckAllVersion(id self, SEL _cmd) {
+    NSString *version = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"8.0.50";
+    NSLog(@"[DK] 🛡️ CheckAllVersion 被调用 → 返回 %@", version);
+    return version;
+}
+
+// ============================================================
+// Hook 13: 人脸/面容检测绕过 — _bypassWCFace
+// 微信可能在人脸认证流程中触发额外的安全检测
+// ============================================================
+
+static BOOL (*original_bypassWCFace)(id self, SEL _cmd);
+
+static BOOL hooked_bypassWCFace(id self, SEL _cmd) {
+    NSLog(@"[DK] 🛡️ _bypassWCFace 被调用 → 返回 YES（跳过人脸检测）");
+    return YES;
+}
+
+// ============================================================
 // DKWeChatJailBreakHook 实现
 // ============================================================
 @implementation DKWeChatJailBreakHook
@@ -278,7 +339,92 @@ static id hooked_checkSystemEnvironment(id self, SEL _cmd) {
         DKSafeHook(className, @"getAbnormalEnvInfo", (IMP)hooked_checkSystemEnvironment, (IMP *)&original_checkSystemEnvironment);
     }
 
-    NSLog(@"[DK] ✅ 微信越狱检测绕过已安装（ObjC 层）");
+    // === 越狱插件检测（微信新版主力检测手段） ===
+    NSArray *pluginCheckClasses = @[
+        @"CUtility", @"WCUtility", @"MMUtility",
+        @"WCSecurityManager", @"SecurityManager",
+        @"WCSecurityLogic", @"MMSecurityCheck",
+        @"WCDeviceInfo", @"DeviceInfo",
+    ];
+    for (NSString *className in pluginCheckClasses) {
+        DKSafeHook(className, @"HasInstallJailbreakPlugin:",
+                   (IMP)hooked_HasInstallJailbreakPlugin,
+                   (IMP *)&original_HasInstallJailbreakPlugin);
+    }
+
+    // === 可疑越狱模块检测（返回空数组） ===
+    NSArray *moduleCheckClasses = @[
+        @"CUtility", @"WCUtility", @"MMUtility",
+        @"WCSecurityManager", @"SecurityManager",
+        @"WCSecurityLogic", @"MMSecurityCheck",
+    ];
+    NSArray *moduleCheckSelectors = @[
+        @"getJailbreakSuspiciousModules",
+        @"jailbreakSuspiciousModules",
+        @"suspiciousModules",
+        @"getSuspiciousModules",
+    ];
+    for (NSString *className in moduleCheckClasses) {
+        for (NSString *selName in moduleCheckSelectors) {
+            DKSafeHook(className, selName,
+                       (IMP)hooked_getJailbreakSuspiciousModules,
+                       (IMP *)&original_getJailbreakSuspiciousModules);
+        }
+    }
+
+    // === 文件完整性检查绕过 ===
+    NSArray *fileCheckClasses = @[
+        @"CUtility", @"WCUtility", @"MMUtility",
+        @"WCSecurityManager", @"SecurityManager",
+        @"WCSecurityLogic", @"MMSecurityCheck",
+        @"WCAccountSecurityMgr", @"WCAccountSafetyMgr",
+    ];
+    for (NSString *className in fileCheckClasses) {
+        DKSafeHook(className, @"BypassFileCheckB:",
+                   (IMP)hooked_BypassFileCheckB,
+                   (IMP *)&original_BypassFileCheckB);
+    }
+
+    // === 版本检查绕过 ===
+    NSArray *versionCheckClasses = @[
+        @"CUtility", @"WCUtility", @"MMUtility",
+        @"MMContext", @"WCContext",
+        @"SettingUtil", @"WCSettingUtil",
+    ];
+    NSArray *versionCheckSelectors = @[
+        @"CheckAllVersion", @"checkAllVersion",
+        @"getVersion", @"currentVersion",
+    ];
+    for (NSString *className in versionCheckClasses) {
+        for (NSString *selName in versionCheckSelectors) {
+            DKSafeHook(className, selName,
+                       (IMP)hooked_CheckAllVersion,
+                       (IMP *)&original_CheckAllVersion);
+        }
+    }
+
+    // === 人脸/面容检测绕过 ===
+    NSArray *faceCheckClasses = @[
+        @"CUtility", @"WCUtility", @"MMUtility",
+        @"WCSecurityManager", @"SecurityManager",
+        @"WCSecurityLogic", @"MMSecurityCheck",
+        @"WCFaceCheckMgr", @"WCFaceAuthMgr",
+        @"WCAccountSafetyMgr",
+    ];
+    NSArray *faceCheckSelectors = @[
+        @"_bypassWCFace", @"bypassWCFace",
+        @"bypassFaceCheck", @"bypassFaceAuth",
+        @"skipFaceCheck", @"skipFaceAuth",
+    ];
+    for (NSString *className in faceCheckClasses) {
+        for (NSString *selName in faceCheckSelectors) {
+            DKSafeHook(className, selName,
+                       (IMP)hooked_bypassWCFace,
+                       (IMP *)&original_bypassWCFace);
+        }
+    }
+
+    NSLog(@"[DK] ✅ 微信越狱检测绕过已安装（ObjC 层，含 13 类 Hook：越狱检测 + 调试器 + 动态库 + Tweak + 文件 + 环境异常 + 插件检测 + 模块检测 + 文件完整性 + 版本检查 + 人脸绕过）");
 }
 
 @end
