@@ -668,6 +668,13 @@ static char kDKBadgeLabelKey;
                 label.textColor = [UIColor colorWithRed:0.3 green:0.9 blue:0.5 alpha:1.0];
             }
 
+            // 置顶账号在名称前加 📌 标识（默认账号与功能项不参与）
+            if (!isAddAccount && !isDefaultAccount && !isFilterToggle && !isClearData && !isVersionInfo && !isLogViewer && !isHideOption) {
+                if ([[DKAccountManager sharedManager] isAccountPinned:item]) {
+                    label.text = [NSString stringWithFormat:@"📌 %@", label.text];
+                }
+            }
+
             [rowView addSubview:label];
             
             if (!isAddAccount && !isHideOption && !isFilterToggle && !isClearData && !isVersionInfo && !isLogViewer) {
@@ -834,6 +841,17 @@ static char kDKBadgeLabelKey;
                                                   style:UIAlertActionStyleDefault
                                                 handler:^(UIAlertAction *action) {
             [self _promptRenameAccount:accountName];
+        }]];
+        
+        // 置顶：置顶后该账号自动排列到默认账号下方最前；再次点击则取消
+        BOOL pinned = [[DKAccountManager sharedManager] isAccountPinned:accountName];
+        NSString *pinTitle = pinned ? @"📌 取消置顶" : @"📌 置顶到默认账号下方";
+        [alert addAction:[UIAlertAction actionWithTitle:pinTitle
+                                                  style:UIAlertActionStyleDefault
+                                                handler:^(UIAlertAction *action) {
+            [[DKAccountManager sharedManager] togglePinForAccount:accountName];
+            [self refreshMenu];
+            [self _showToast:pinned ? @"已取消置顶" : @"已置顶到默认账号下方"];
         }]];
         
         [alert addAction:[UIAlertAction actionWithTitle:@"设为默认账号"

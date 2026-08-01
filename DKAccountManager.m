@@ -14,6 +14,7 @@ static NSString *const kDKCurrentAccountKey = @"DK_Current_Account";
 static NSString *const kDKDefaultAccountName = @"__DK_DEFAULT__";
 static NSString *const kDKCurrentAccountFile = @".dk_current_account";
 static NSString *const kDKDesignatedDefaultFile = @".dk_designated_default";
+static NSString *const kDKPinnedAccountsFile = @".dk_pinned_accounts.plist";
 
 // ============================================================
 // 内部存储 — 使用 App Group 级别共享存储
@@ -22,6 +23,7 @@ static NSString *_accountsRootPath = nil;
 
 @implementation DKAccountManager {
     NSMutableArray<NSString *> *_accountNames;
+    NSMutableArray<NSString *> *_pinnedAccountNames;
     NSString *_currentAccountName;
     NSString *_designatedDefaultAccountName;
     NSMutableDictionary<NSString *, NSDictionary *> *_metadataCache;
@@ -40,6 +42,7 @@ static NSString *_accountsRootPath = nil;
     self = [super init];
     if (self) {
         _accountNames = [NSMutableArray array];
+        _pinnedAccountNames = [NSMutableArray array];
         _metadataCache = [NSMutableDictionary dictionary];
         _currentAccountName = kDKDefaultAccountName;
         _designatedDefaultAccountName = nil;
@@ -243,6 +246,11 @@ static NSString *_accountsRootPath = nil;
         }
     }
 
+    // 加载置顶列表，并按"置顶优先"重排账号顺序（置顶账号紧贴默认账号下方）
+    _pinnedAccountNames = [[self _loadPinnedAccounts] mutableCopy];
+    [self _reorderAccountNamesByPin];
+    [self _savePinnedAccounts]; // 顺带回写清理掉已失效的置顶项
+
     // 重要：先临时设为默认账号，这样 NSUserDefaults Hook 的 objectForKey 走 %orig，
     // 读取原始 NSUserDefaults（而非某个账号的独立 plist），确保读到正确的保存状态
     _currentAccountName = kDKDefaultAccountName;
@@ -362,6 +370,8 @@ static NSString *_accountsRootPath = nil;
     
     [_accountNames removeObject:name];
     [_metadataCache removeObjectForKey:name];
+    [_pinnedAccountNames removeObject:name];
+    [self _savePinnedAccounts];
     [self _saveAccountList];
     
     NSLog(@"[DK] 账号已删除: %@", name);
@@ -431,6 +441,13 @@ static NSString *_accountsRootPath = nil;
     [_metadataCache removeObjectForKey:oldName];
     _metadataCache[newName] = meta;
     
+    // 如果重命名的账号已置顶，同步替换置顶列表中的旧名
+    NSUInteger pinnedIdx = [_pinnedAccountNames indexOfObject:oldName];
+    if (pinnedIdx != NSNotFound) {
+        [_pinnedAccountNames replaceObjectAtIndex:pinnedIdx withObject:newName];
+        [self _savePinnedAccounts];
+    }
+    
     // 如果重命名的是当前活跃账号，同步更新
     if ([_currentAccountName isEqualToString:oldName]) {
         _currentAccountName = newName;
@@ -457,6 +474,7 @@ static NSString *_accountsRootPath = nil;
     // 先把运行态重置为默认账号，避免清理后继续指向已删除的 B/C/D 账号目录。
     _currentAccountName = kDKDefaultAccountName;
     [_accountNames removeAllObjects];
+    [_pinnedAccountNames removeAllObjects];
     [_metadataCache removeAllObjects];
 
     // 插件内部状态必须写入原始 NSUserDefaults，不能被当前账号 Hook 到子账号 plist。
@@ -927,6 +945,74 @@ static NSString *_accountsRootPath = nil;
 - (void)_saveAccountList {
     NSString *listPath = [self.accountsRootPath stringByAppendingPathComponent:@".dk_accounts.plist"];
     [_accountNames writeToFile:listPath atomically:YES];
+}
+
+#pragma mark - 账号置顶
+
+- (NSString *)_pinnedAccountsFilePath {
+    return [self.accountsRootPath stringByAppendingPathComponent:kDKPinnedAccountsFile];
+}
+
+- (NSArray<NSString *> *)_loadPinnedAccounts {
+    NSArray<NSString *> *pinned = [NSArray arrayWithContentsOfFile:[self _pinnedAccountsFilePath]];
+    return pinned ?: @[];
+}
+
+- (void)_savePinnedAccounts {
+    [_pinnedAccountNames writeToFile:[self _pinnedAccountsFilePath] atomically:YES];
+}
+
+/// 按"置顶优先"重排 _accountNames，置顶账号排在最前（紧贴默认账号下方）。
+/// 同时清理掉已失效（账号已删除/重命名）的置顶项。
+- (void)_reorderAccountNamesByPin {
+    // 先按 _pinnedAccountNames 顺序收集仍存在的置顶账号
+    NSMutableArray<NSString *> *orderedPinned = [NSMutableArray array];
+    for (NSString *p in _pinnedAccountNames) {
+        if ([_accountNames containsObject:p] && ![orderedPinned containsObject:p]) {
+            [orderedPinned addObject:p];
+        }
+    }
+    // 其余未置顶账号保持原有顺序
+    NSMutableArray<NSString *> *rest = [NSMutableArray array];
+    for (NSString *name in _accountNames) {
+        if (![orderedPinned containsObject:name]) {
+            [rest addObject:name];
+        }
+    }
+    // 重建 _accountNames：置顶在前，其余在后
+    [_accountNames removeAllObjects];
+    [_accountNames addObjectsFromArray:orderedPinned];
+    [_accountNames addObjectsFromArray:rest];
+    // 同步清理置顶列表，丢弃已失效的项
+    [_pinnedAccountNames removeAllObjects];
+    [_pinnedAccountNames addObjectsFromArray:orderedPinned];
+}
+
+- (BOOL)isAccountPinned:(NSString *)accountName {
+    if (!accountName) return NO;
+    return [_pinnedAccountNames containsObject:accountName];
+}
+
+- (NSArray<NSString *> *)pinnedAccountNames {
+    return [_pinnedAccountNames copy];
+}
+
+- (void)togglePinForAccount:(NSString *)accountName {
+    if (!accountName || ![_accountNames containsObject:accountName]) return;
+    if ([accountName isEqualToString:kDKDefaultAccountName]) return;
+
+    if ([_pinnedAccountNames containsObject:accountName]) {
+        // 已置顶 → 取消
+        [_pinnedAccountNames removeObject:accountName];
+        NSLog(@"[DK] 账号「%@」已取消置顶", accountName);
+    } else {
+        // 未置顶 → 置顶到最前（紧贴默认账号下方）
+        [_pinnedAccountNames insertObject:accountName atIndex:0];
+        NSLog(@"[DK] 账号「%@」已置顶到默认账号下方", accountName);
+    }
+    [self _savePinnedAccounts];
+    [self _reorderAccountNamesByPin];
+    [self _saveAccountList];
 }
 
 @end

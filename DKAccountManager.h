@@ -60,6 +60,15 @@
 /// 获取账号元数据（如创建时间等）
 - (NSDictionary *)metadataForAccount:(NSString *)accountName;
 
+#pragma mark - 账号置顶
+
+/// 账号是否已置顶（置顶后排列到默认账号下方最前）
+- (BOOL)isAccountPinned:(NSString *)accountName;
+/// 切换账号置顶状态（已置顶→取消；未置顶→置顶到最前，紧贴默认账号下方）
+- (void)togglePinForAccount:(NSString *)accountName;
+/// 已置顶账号列表（最新置顶的在前）
+- (NSArray<NSString *> *)pinnedAccountNames;
+
 /// 被指定为默认的账号名称（nil 表示使用原始沙盒作为默认账号）
 /// 设定后，该账号的数据将直接使用 NSHomeDirectory()，而非独立备份目录
 @property (nonatomic, copy, readonly) NSString *designatedDefaultAccountName;
