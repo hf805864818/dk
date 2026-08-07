@@ -1305,6 +1305,13 @@ static id hooked_sessionWithConfig(Class cls, SEL sel, NSURLSessionConfiguration
     static BOOL cleared = NO;
 
     dispatch_once(&onceToken, ^{
+        // 仅 MonkeyCode 子账号需要清除 WKWebView cookie
+        // TRAE 和微信不使用 WKWebView 登录，无需干预
+        if (!DKIsMonkeyCode()) {
+            shouldClear = NO;
+            return;
+        }
+
         if (DKIsStartupGuardActive()) {
             shouldClear = NO;
             return;
@@ -1378,7 +1385,9 @@ static id hooked_sessionWithConfig(Class cls, SEL sel, NSURLSessionConfiguration
 - (void)application:(UIApplication *)application didRegisterForRemoteNotificationsWithDeviceToken:(NSData *)deviceToken {
     NSData *tokenToUse = deviceToken;
 
-    if (!DKIsStartupGuardActive()) {
+    if (!DKIsStartupGuardActive() && DKIsMonkeyCode()) {
+        // 仅 MonkeyCode 隔离 APNs deviceToken。
+        // TRAE 和微信的推送依赖原始 token，修改会导致推送失效。
         DKAccountManager *manager = [DKAccountManager sharedManager];
         NSString *currentAccount = [manager currentAccountName];
 
