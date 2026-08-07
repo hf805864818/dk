@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.109] - 2026-08-07
+
+- b7c7f3e fix: 修复编译错误 - 合并重复的 UIApplication hook
+- 9e156ac fix: 限制 WKWebView 和 APNs Hook 仅对 MonkeyCode 生效
+- 2d1c0ee fix: 添加 WKWebView cookie 隔离和 APNs deviceToken 隔离
+
+
 ## [1.0.108] - 2026-08-07
 
 - 2702819 feat: 适配 MonkeyCode 多开账号支持
