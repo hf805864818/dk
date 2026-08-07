@@ -19,6 +19,7 @@
 #import <fcntl.h>
 #import <stdarg.h>
 #import <stdio.h>
+#import <CommonCrypto/CommonDigest.h>
 #import "fishhook/fishhook.h"
 
 #import "DKAccountManager.h"
@@ -49,6 +50,41 @@
 // ============================================================
 static NSString* DKGetCurrentBundleID(void) {
     return [[NSBundle mainBundle] bundleIdentifier] ?: @"unknown";
+}
+
+// ============================================================
+// 应用识别辅助函数
+// 用于区分 TRAE / 微信 / MonkeyCode，控制各应用专属功能
+// ============================================================
+static NSString* const DK_BUNDLE_TRAE       = @"com.stone.solo.cn";
+static NSString* const DK_BUNDLE_WECHAT    = @"com.tencent.xin";
+static NSString* const DK_BUNDLE_MONKEYCODE = @"com.chaitin.baizhi.monkeycode";
+
+static BOOL DKIsMonkeyCode(void) {
+    static BOOL checked = NO;
+    static BOOL isMC = NO;
+    if (!checked) {
+        isMC = [DKGetCurrentBundleID() isEqualToString:DK_BUNDLE_MONKEYCODE];
+        checked = YES;
+    }
+    return isMC;
+}
+
+static BOOL DKIsTRAE(void) {
+    static BOOL checked = NO;
+    static BOOL isTRAE = NO;
+    if (!checked) {
+        isTRAE = [DKGetCurrentBundleID() isEqualToString:DK_BUNDLE_TRAE];
+        checked = YES;
+    }
+    return isTRAE;
+}
+
+/// 内容过滤绕过（DKContentFilterBypass）和 NSURLSession 代理注入
+/// 仅适用于 TRAE。MonkeyCode 是标准的 React Native 应用，
+/// 其 API 响应结构与 TRAE 不同，内容过滤会破坏登录等关键 API 的响应。
+static BOOL DKShouldApplyContentFilter(void) {
+    return DKIsTRAE();
 }
 
 // ============================================================
@@ -478,6 +514,7 @@ static BOOL DKShouldUseOriginalCFPreferences(void) {
 + (id)JSONObjectWithData:(NSData *)data options:(NSJSONReadingOptions)opt error:(NSError **)error {
     id result = %orig(data, opt, error);
     if (!result || error == NULL || *error != nil) return result;
+    if (!DKShouldApplyContentFilter()) return result;
     if (![DKContentFilterBypass sharedInstance].enabled) return result;
     
     // 处理字典类型
@@ -500,6 +537,7 @@ static BOOL DKShouldUseOriginalCFPreferences(void) {
 + (id)JSONObjectWithStream:(NSInputStream *)stream options:(NSJSONReadingOptions)opt error:(NSError **)error {
     id result = %orig(stream, opt, error);
     if (!result || error == NULL || *error != nil) return result;
+    if (!DKShouldApplyContentFilter()) return result;
     if (![DKContentFilterBypass sharedInstance].enabled) return result;
     
     if ([result isKindOfClass:[NSDictionary class]]) {
@@ -993,6 +1031,11 @@ didReceiveNotificationResponse:(UNNotificationResponse *)response
         return %orig;
     }
 
+    // MonkeyCode：不包装 completionHandler，避免内容过滤破坏 API 响应
+    if (!DKShouldApplyContentFilter()) {
+        return %orig;
+    }
+
     void (^wrappedHandler)(NSData *, NSURLResponse *, NSError *) = nil;
 
     if (completionHandler) {
@@ -1011,6 +1054,11 @@ didReceiveNotificationResponse:(UNNotificationResponse *)response
     // 微信模式：直接透传
     NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
     if ([bundleID isEqualToString:@"com.tencent.xin"]) {
+        return %orig;
+    }
+
+    // MonkeyCode：不包装 completionHandler
+    if (!DKShouldApplyContentFilter()) {
         return %orig;
     }
 
@@ -1039,6 +1087,10 @@ didReceiveNotificationResponse:(UNNotificationResponse *)response
     if ([bundleID isEqualToString:@"com.tencent.xin"]) {
         return %orig(request, DKRemapFileURL(fileURL), completionHandler);
     }
+    // MonkeyCode：保留文件路径重映射，但不包装 completionHandler
+    if (!DKShouldApplyContentFilter()) {
+        return %orig(request, DKRemapFileURL(fileURL), completionHandler);
+    }
     void (^wrappedHandler)(NSData *, NSURLResponse *, NSError *) = nil;
     if (completionHandler) {
         wrappedHandler = ^(NSData *data, NSURLResponse *response, NSError *error) {
@@ -1061,6 +1113,10 @@ didReceiveNotificationResponse:(UNNotificationResponse *)response
     // 微信模式：直接透传
     NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
     if ([bundleID isEqualToString:@"com.tencent.xin"]) {
+        return %orig(request, bodyData, completionHandler);
+    }
+    // MonkeyCode：不包装 completionHandler
+    if (!DKShouldApplyContentFilter()) {
         return %orig(request, bodyData, completionHandler);
     }
     void (^wrappedHandler)(NSData *, NSURLResponse *, NSError *) = nil;
@@ -1159,6 +1215,69 @@ static id hooked_sessionWithConfig(Class cls, SEL sel, NSURLSessionConfiguration
 
 %end
 
+// ============================================================
+// Hook 13: UIDevice - identifierForVendor 设备标识隔离
+//
+// MonkeyCode（白泽/长亭）使用 identifierForVendor (IDFV) 生成
+// 设备指纹，用于登录验证码发送、captcha token 获取等流程。
+// IDFV 是系统级标识符，同一设备上同 vendor 的所有 App 共享
+// 同一值，DK 的文件/Keychain Hook 无法隔离。
+//
+// 若不 Hook，子账号登录时服务器检测到与默认账号相同的设备指纹，
+// 会判定为同一设备重复注册，拒绝登录（"登录失败，请重试"）。
+//
+// 策略：
+//   - 默认账号 / 指定默认账号：返回原始 IDFV（不影响原功能）
+//   - 子账号：返回基于账号名 + 原始 IDFV 生成的确定性 UUID
+//     （同一子账号每次启动都得到相同的 UUID，不同子账号各不相同）
+// ============================================================
+%hook UIDevice
+
+- (NSUUID *)identifierForVendor {
+    NSUUID *original = %orig;
+
+    if (DKIsStartupGuardActive()) return original;
+
+    DKAccountManager *manager = [DKAccountManager sharedManager];
+    NSString *currentAccount = [manager currentAccountName];
+
+    // 默认账号不修改
+    if ([currentAccount isEqualToString:[manager defaultAccountName]]) {
+        return original;
+    }
+    // 指定默认账号也不修改
+    NSString *designatedDefault = [manager designatedDefaultAccountName];
+    if (designatedDefault && [currentAccount isEqualToString:designatedDefault]) {
+        return original;
+    }
+
+    // 子账号：基于账号名 + 原始 IDFV 生成确定性 UUID
+    // 使用 SHA-256 保证不同账号名生成不同的 UUID
+    NSString *seed = [NSString stringWithFormat:@"DK_IDFV_%@_%@",
+                      currentAccount, [original UUIDString]];
+    const char *seedStr = [seed UTF8String];
+    unsigned char digest[CC_SHA256_DIGEST_LENGTH];
+    CC_SHA256(seedStr, (CC_LONG)strlen(seedStr), digest);
+
+    // NSUUID 需要 16 字节 (128 bit)
+    // RFC 4122 version 4: 设置第 7 字节高 4 位为 0100，第 9 字节高 2 位为 10
+    digest[6] = (digest[6] & 0x0F) | 0x40;
+    digest[8] = (digest[8] & 0x3F) | 0x80;
+
+    NSUUID *derivedUUID = [[NSUUID alloc] initWithUUIDBytes:digest];
+
+    static BOOL loggedOnce = NO;
+    if (!loggedOnce) {
+        NSLog(@"[DK] identifierForVendor 已隔离: 账号「%@」UUID %@ → %@",
+              currentAccount, [original UUIDString], [derivedUUID UUIDString]);
+        loggedOnce = YES;
+    }
+
+    return derivedUUID;
+}
+
+%end
+
 %end // %group TRAE
 
 // ============================================================
@@ -1212,7 +1331,8 @@ static id hooked_sessionWithConfig(Class cls, SEL sel, NSURLSessionConfiguration
         NSLog(@"========================================");
         NSLog(@"[DK] DK Multi-Account Tweak v%@ 已加载", DK_VERSION);
         NSLog(@"[DK] 构建时间: %@", DK_BUILD_TIME);
-        NSLog(@"[DK] 当前应用: %@%@", bundleID, isWeChat ? @" (微信)" : @"");
+        NSLog(@"[DK] 当前应用: %@%@", bundleID,
+              isWeChat ? @" (微信)" : (DKIsMonkeyCode() ? @" (MonkeyCode)" : @" (TRAE)"));
         NSLog(@"========================================");
 
         // ============================================
@@ -1281,7 +1401,8 @@ static id hooked_sessionWithConfig(Class cls, SEL sel, NSURLSessionConfiguration
         // 此时 _dkStartupGuard = YES，Hook 暂时透传
         // ============================================
         %init(TRAE);
-        NSLog(@"[DK] Logos Hook 已安装（%@ 多账号隔离）", isWeChat ? @"微信" : @"TRAE");
+        NSLog(@"[DK] Logos Hook 已安装（%@ 多账号隔离）",
+              isWeChat ? @"微信" : (DKIsMonkeyCode() ? @"MonkeyCode" : @"TRAE"));
 
         // ============================================
         // 第二步：安装 C 函数 Hook（fishhook rebind_symbols）
@@ -1360,8 +1481,10 @@ static id hooked_sessionWithConfig(Class cls, SEL sel, NSURLSessionConfiguration
         // ============================================
         // 第 2.5 步：Hook NSURLSession 类方法 — 代理注入（仅 TRAE）
         // 微信不需要 SSE 流式过滤和敏感词处理。
+        // MonkeyCode 也不需要：代理注入会包装所有 delegate-based
+        // NSURLSession，干扰 React Native fetch/WebSocket 的响应处理。
         // ============================================
-        if (!isWeChat) {
+        if (!isWeChat && DKShouldApplyContentFilter()) {
             Class sessionClass = objc_getClass("NSURLSession");
             if (sessionClass) {
                 MSHookMessageEx(object_getClass(sessionClass),
@@ -1422,8 +1545,13 @@ static id hooked_sessionWithConfig(Class cls, SEL sel, NSURLSessionConfiguration
                 [[DKLogManager sharedInstance] startCapture];
                 [[DKAccountUI sharedInstance] setup];  // 悬浮按钮：微信中也会出现
 
-                if (!isWeChat) {
+                if (!isWeChat && DKIsTRAE()) {
                     // === TRAE 专属模块 ===
+                    // 内容过滤绕过和会话刷新仅适用于 TRAE。
+                    // MonkeyCode 的 API 响应结构与 TRAE 不同，
+                    // 内容过滤会破坏登录等关键 API 的响应（将错误码替换为 0）。
+                    // 会话刷新使用 TRAE 专属心跳 URL (api.trae.ai/heartbeat)，
+                    // 对 MonkeyCode 无意义且可能触发不必要的网络请求。
                     [[DKContentFilterBypass sharedInstance] setup];
                     [[DKNetworkSessionManager sharedManager] scheduleSessionRefresh];
 
@@ -1437,7 +1565,7 @@ static id hooked_sessionWithConfig(Class cls, SEL sel, NSURLSessionConfiguration
                     }
                 }
 
-                NSLog(@"[DK] ✅ 所有模块初始化完成 (%@)", isWeChat ? @"微信" : @"TRAE");
+                NSLog(@"[DK] ✅ 所有模块初始化完成 (%@)", isWeChat ? @"微信" : (DKIsMonkeyCode() ? @"MonkeyCode" : @"TRAE"));
 
                 // ============================================
                 // 崩溃恢复：子账号无有效会话时自动显示悬浮按钮

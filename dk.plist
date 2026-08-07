@@ -3,6 +3,7 @@
         Bundles = (
             "com.stone.solo.cn",
             "com.tencent.xin",
+            "com.chaitin.baizhi.monkeycode",
         );
     };
     DKConfig = {
@@ -11,6 +12,7 @@
         SupportedBundles = (
             "com.stone.solo.cn",
             "com.tencent.xin",
+            "com.chaitin.baizhi.monkeycode",
         );
         // 悬浮按钮隐藏方式: "doubletap"(双击) / "swipe"(侧滑) / "both"(两者)
         HideGesture = "both";

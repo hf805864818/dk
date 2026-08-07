@@ -309,6 +309,13 @@ static BOOL DKIsSessionRelatedDefaultsKey(NSString *key) {
     // 发送轻量心跳请求保持 Token 活跃
     // 具体实现取决于目标应用的后端 API
     // 这里提供框架，实际 API 端点需要根据 TRAE 后端调整
+    //
+    // 心跳 URL (api.trae.ai/heartbeat) 是 TRAE 专属端点。
+    // 非 TRAE 应用（如 MonkeyCode）跳过心跳，避免向无关 API 发送请求。
+    NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
+    if (![bundleID isEqualToString:@"com.stone.solo.cn"]) {
+        return;
+    }
 
     NSString *sessionPath = [self sessionPathForAccount:accountName];
     NSDictionary *sessionData = [NSDictionary dictionaryWithContentsOfFile:sessionPath];

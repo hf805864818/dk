@@ -9,7 +9,7 @@ export ARCHS = arm64 arm64e
 THEOS_PACKAGE_SCHEME = rootless
 
 # 注入目标进程（可多个）
-INSTALL_TARGET_PROCESSES = TRAE
+INSTALL_TARGET_PROCESSES = TRAE MonkeyCode
 
 # ============================================================
 # 从 VERSION 文件读取版本号，作为编译宏注入
