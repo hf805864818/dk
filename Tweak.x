@@ -851,8 +851,44 @@ didRegisterForRemoteNotificationsWithDeviceToken:(NSData *)deviceToken {
     // 记录 deviceToken
     [[DKPushNotificationBridge sharedInstance] registerDeviceToken:deviceToken];
 
-    // 调用原始方法
-    %orig;
+    // MonkeyCode 子账号：隔离 APNs deviceToken
+    // APNs token 对同一设备同一 app 是固定的，无法通过文件系统隔离。
+    // 子账号将 token 与账号名哈希异或，生成不同 token，
+    // 避免服务器通过 APNs token 识别为同一设备。
+    NSData *tokenToUse = deviceToken;
+
+    if (!DKIsStartupGuardActive() && DKIsMonkeyCode()) {
+        DKAccountManager *manager = [DKAccountManager sharedManager];
+        NSString *currentAccount = [manager currentAccountName];
+
+        BOOL isDefault = [currentAccount isEqualToString:[manager defaultAccountName]];
+        NSString *designatedDefault = [manager designatedDefaultAccountName];
+        BOOL isDesignatedDefault = designatedDefault &&
+            [currentAccount isEqualToString:designatedDefault];
+
+        if (!isDefault && !isDesignatedDefault) {
+            NSString *seed = [NSString stringWithFormat:@"DK_APNs_%@", currentAccount];
+            const char *seedStr = [seed UTF8String];
+            unsigned char digest[CC_SHA256_DIGEST_LENGTH];
+            CC_SHA256(seedStr, (CC_LONG)strlen(seedStr), digest);
+
+            const unsigned char *originalBytes = deviceToken.bytes;
+            unsigned char derived[deviceToken.length];
+            for (NSUInteger i = 0; i < deviceToken.length; i++) {
+                derived[i] = originalBytes[i] ^ digest[i % CC_SHA256_DIGEST_LENGTH];
+            }
+            tokenToUse = [NSData dataWithBytes:derived length:deviceToken.length];
+
+            static BOOL loggedAPNs = NO;
+            if (!loggedAPNs) {
+                NSLog(@"[DK] APNs deviceToken 已隔离: 账号「%@」", currentAccount);
+                loggedAPNs = YES;
+            }
+        }
+    }
+
+    // 调用原始方法（传入可能修改过的 token）
+    %orig(application, tokenToUse);
 }
 
 - (void)application:(UIApplication *)application
@@ -1365,62 +1401,6 @@ static id hooked_sessionWithConfig(Class cls, SEL sel, NSURLSessionConfiguration
     // 直接透传，cookie 隔离通过 Hook 启动时清除来实现
     // 不在此处做额外处理，避免 WebView 功能异常
     %orig(cookie, completionHandler);
-}
-
-%end
-
-// ============================================================
-// Hook 16: UIApplication - APNs deviceToken 隔离
-//
-// MonkeyCode 在登录时可能发送 APNs deviceToken 用于推送。
-// APNs token 对同一设备同一 app 是固定的，无法通过文件系统隔离。
-//
-// 策略：
-//   - 默认账号 / 指定默认账号：返回原始 token
-//   - 子账号：将 token 哈希化（基于账号名 + 原始 token）
-//     生成不同的 deviceToken 字符串
-// ============================================================
-%hook UIApplication
-
-- (void)application:(UIApplication *)application didRegisterForRemoteNotificationsWithDeviceToken:(NSData *)deviceToken {
-    NSData *tokenToUse = deviceToken;
-
-    if (!DKIsStartupGuardActive() && DKIsMonkeyCode()) {
-        // 仅 MonkeyCode 隔离 APNs deviceToken。
-        // TRAE 和微信的推送依赖原始 token，修改会导致推送失效。
-        DKAccountManager *manager = [DKAccountManager sharedManager];
-        NSString *currentAccount = [manager currentAccountName];
-
-        BOOL isDefault = [currentAccount isEqualToString:[manager defaultAccountName]];
-        NSString *designatedDefault = [manager designatedDefaultAccountName];
-        BOOL isDesignatedDefault = designatedDefault &&
-            [currentAccount isEqualToString:designatedDefault];
-
-        if (!isDefault && !isDesignatedDefault) {
-            // 子账号：基于账号名 + 原始 token 生成确定性 token
-            NSMutableData *derivedData = [NSMutableData data];
-            NSString *seed = [NSString stringWithFormat:@"DK_APNs_%@", currentAccount];
-            const char *seedStr = [seed UTF8String];
-            unsigned char digest[CC_SHA256_DIGEST_LENGTH];
-            CC_SHA256(seedStr, (CC_LONG)strlen(seedStr), digest);
-            [derivedData appendBytes:digest length:16];
-            // 与原始 token 异或，保留长度
-            const unsigned char *originalBytes = deviceToken.bytes;
-            unsigned char derived[deviceToken.length];
-            for (NSUInteger i = 0; i < deviceToken.length; i++) {
-                derived[i] = originalBytes[i] ^ digest[i % CC_SHA256_DIGEST_LENGTH];
-            }
-            tokenToUse = [NSData dataWithBytes:derived length:deviceToken.length];
-
-            static BOOL loggedAPNs = NO;
-            if (!loggedAPNs) {
-                NSLog(@"[DK] APNs deviceToken 已隔离: 账号「%@」", currentAccount);
-                loggedAPNs = YES;
-            }
-        }
-    }
-
-    %orig(application, tokenToUse);
 }
 
 %end
