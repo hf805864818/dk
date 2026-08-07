@@ -53,7 +53,7 @@ dk_OBJCFLAGS = -fobjc-arc -Wno-error -I. \
                -DDK_BUILD_TIME='@"$(DK_BUILD_TIME)"'
 
 # 链接框架（新增 UserNotifications）
-dk_FRAMEWORKS = UIKit Foundation Security CoreGraphics UserNotifications
+dk_FRAMEWORKS = UIKit Foundation Security CoreGraphics UserNotifications WebKit
 # 注：AppSupport 私有框架在 iOS SDK 中不存在，已移除
 
 # 链接库（-lobjc 由 Theos 自动添加，无需重复）

@@ -20,6 +20,7 @@
 #import <stdarg.h>
 #import <stdio.h>
 #import <CommonCrypto/CommonDigest.h>
+#import <WebKit/WebKit.h>
 #import "fishhook/fishhook.h"
 
 #import "DKAccountManager.h"
@@ -1278,6 +1279,143 @@ static id hooked_sessionWithConfig(Class cls, SEL sel, NSURLSessionConfiguration
 
 %end
 
+// ============================================================
+// Hook 14: WKWebView Cookie / DataStore 隔离
+//
+// MonkeyCode 登录流程使用 RNCWebView (WKWebView) 加载 Baizhi OAuth 页面。
+// WKWebView 有独立的 cookie 存储 (WKHTTPCookieStore)，与
+// NSHTTPCookieStorage 完全隔离。DK 的 Cookie Hook 无法覆盖。
+//
+// 若不隔离，子账号启动时 WKWebView 仍保留默认账号的 cookie，
+// 服务器检测到已有会话（来自默认账号）而拒绝登录。
+//
+// 策略：
+//   - 默认账号 / 指定默认账号：不干预，使用原始 dataStore
+//   - 子账号：清除 defaultDataStore 的所有 cookie 和网站数据
+//     确保 WebView 在干净的 cookie 环境中加载登录页
+// ============================================================
+%hook WKWebsiteDataStore
+
++ (WKWebsiteDataStore *)defaultDataStore {
+    WKWebsiteDataStore *store = %orig;
+
+    // 仅子账号执行清理
+    static dispatch_once_t onceToken;
+    static BOOL shouldClear = NO;
+    static BOOL cleared = NO;
+
+    dispatch_once(&onceToken, ^{
+        if (DKIsStartupGuardActive()) {
+            shouldClear = NO;
+            return;
+        }
+
+        DKAccountManager *manager = [DKAccountManager sharedManager];
+        NSString *currentAccount = [manager currentAccountName];
+
+        // 默认账号和指定默认账号不清理
+        if ([currentAccount isEqualToString:[manager defaultAccountName]]) {
+            shouldClear = NO;
+            return;
+        }
+        NSString *designatedDefault = [manager designatedDefaultAccountName];
+        if (designatedDefault && [currentAccount isEqualToString:designatedDefault]) {
+            shouldClear = NO;
+            return;
+        }
+
+        shouldClear = YES;
+    });
+
+    if (shouldClear && !cleared) {
+        cleared = YES;
+        // 清除所有 cookie 和网站数据
+        NSSet *websiteDataTypes = [WKWebsiteDataStore allWebsiteDataTypes];
+        NSDate *dateFrom = [NSDate dateWithTimeIntervalSince1970:0];
+        [store removeDataOfTypes:websiteDataTypes
+                  modifiedSince:dateFrom
+                 completionHandler:^{
+            NSLog(@"[DK] WKWebView cookie 和网站数据已清除（账号隔离）");
+        }];
+        NSLog(@"[DK] WKWebsiteDataStore 已标记清理（子账号 WebView 隔离）");
+    }
+
+    return store;
+}
+
+%end
+
+// ============================================================
+// Hook 15: WKHTTPCookieStore - Cookie 写入拦截
+//
+// 防止 WebView 在子账号环境下写入的 cookie 被默认账号的
+// WebView 读取。通过在 setCookie: 时记录但不阻止，
+// 在子账号启动时清除所有 WebView cookie 来实现隔离。
+// ============================================================
+%hook WKHTTPCookieStore
+
+- (void)setCookie:(NSHTTPCookie *)cookie completionHandler:(void (^)(void))completionHandler {
+    // 直接透传，cookie 隔离通过 Hook 启动时清除来实现
+    // 不在此处做额外处理，避免 WebView 功能异常
+    %orig(cookie, completionHandler);
+}
+
+%end
+
+// ============================================================
+// Hook 16: UIApplication - APNs deviceToken 隔离
+//
+// MonkeyCode 在登录时可能发送 APNs deviceToken 用于推送。
+// APNs token 对同一设备同一 app 是固定的，无法通过文件系统隔离。
+//
+// 策略：
+//   - 默认账号 / 指定默认账号：返回原始 token
+//   - 子账号：将 token 哈希化（基于账号名 + 原始 token）
+//     生成不同的 deviceToken 字符串
+// ============================================================
+%hook UIApplication
+
+- (void)application:(UIApplication *)application didRegisterForRemoteNotificationsWithDeviceToken:(NSData *)deviceToken {
+    NSData *tokenToUse = deviceToken;
+
+    if (!DKIsStartupGuardActive()) {
+        DKAccountManager *manager = [DKAccountManager sharedManager];
+        NSString *currentAccount = [manager currentAccountName];
+
+        BOOL isDefault = [currentAccount isEqualToString:[manager defaultAccountName]];
+        NSString *designatedDefault = [manager designatedDefaultAccountName];
+        BOOL isDesignatedDefault = designatedDefault &&
+            [currentAccount isEqualToString:designatedDefault];
+
+        if (!isDefault && !isDesignatedDefault) {
+            // 子账号：基于账号名 + 原始 token 生成确定性 token
+            NSMutableData *derivedData = [NSMutableData data];
+            NSString *seed = [NSString stringWithFormat:@"DK_APNs_%@", currentAccount];
+            const char *seedStr = [seed UTF8String];
+            unsigned char digest[CC_SHA256_DIGEST_LENGTH];
+            CC_SHA256(seedStr, (CC_LONG)strlen(seedStr), digest);
+            [derivedData appendBytes:digest length:16];
+            // 与原始 token 异或，保留长度
+            const unsigned char *originalBytes = deviceToken.bytes;
+            unsigned char derived[deviceToken.length];
+            for (NSUInteger i = 0; i < deviceToken.length; i++) {
+                derived[i] = originalBytes[i] ^ digest[i % CC_SHA256_DIGEST_LENGTH];
+            }
+            tokenToUse = [NSData dataWithBytes:derived length:deviceToken.length];
+
+            static BOOL loggedAPNs = NO;
+            if (!loggedAPNs) {
+                NSLog(@"[DK] APNs deviceToken 已隔离: 账号「%@」", currentAccount);
+                loggedAPNs = YES;
+            }
+        }
+    }
+
+    %orig(application, tokenToUse);
+}
+
+%end
+
 %end // %group TRAE
 
 // ============================================================
@@ -1563,6 +1701,25 @@ static id hooked_sessionWithConfig(Class cls, SEL sel, NSURLSessionConfiguration
                         NSLog(@"[DK] 当前为子账号 %@，默认账号暂无快照；切回默认并登录后会自动保存",
                               [manager currentAccountName]);
                     }
+                }
+
+                // === MonkeyCode: 子账号启动时清除 WKWebView cookie ===
+                // MonkeyCode 登录流程使用 WKWebView (RNCWebView) 加载 Baizhi OAuth 页面。
+                // WKWebView 有独立的 cookie 存储，与 NSHTTPCookieStorage 隔离。
+                // 子账号启动时必须清除 WKWebView 的 cookie，否则服务器检测到
+                // 默认账号的已有会话，拒绝登录。
+                if (DKIsMonkeyCode() && isNonDefaultAccount) {
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        WKWebsiteDataStore *store = [WKWebsiteDataStore defaultDataStore];
+                        NSSet *dataTypes = [WKWebsiteDataStore allWebsiteDataTypes];
+                        NSDate *dateFrom = [NSDate dateWithTimeIntervalSince1970:0];
+                        [store removeDataOfTypes:dataTypes
+                                  modifiedSince:dateFrom
+                                 completionHandler:^{
+                            NSLog(@"[DK] MonkeyCode 子账号 WKWebView 数据已清除");
+                        }];
+                        NSLog(@"[DK] MonkeyCode 子账号 WKWebView 清理已触发");
+                    });
                 }
 
                 NSLog(@"[DK] ✅ 所有模块初始化完成 (%@)", isWeChat ? @"微信" : (DKIsMonkeyCode() ? @"MonkeyCode" : @"TRAE"));
