@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.0.111] - 2026-08-10
+
+- 7f0d99c fix: 修复 MonkeyCode 多开子账号登录失败
+
+
 ## [1.0.110] - 2026-08-10
 
 - fix: 修复 MonkeyCode 多开子账号登录失败 — NSURLSessionConfiguration Hook 注入了 __DK_ 前缀内部元数据键作为非法 HTTP 头，导致请求损坏
