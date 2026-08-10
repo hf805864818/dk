@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.110] - 2026-08-10
+
+- fix: 修复 MonkeyCode 多开子账号登录失败 — NSURLSessionConfiguration Hook 注入了 __DK_ 前缀内部元数据键作为非法 HTTP 头，导致请求损坏
+- feat: 新增 DKFilterAuthHeadersForHTTP 过滤函数，移除内部元数据键和非 NSString/NSData 值
+- fix: MonkeyCode (React Native) 完全跳过 HTTPAdditionalHeaders 注入，RN 在 JS 层管理 auth token
+
+
 ## [1.0.109] - 2026-08-07
 
 - b7c7f3e fix: 修复编译错误 - 合并重复的 UIApplication hook

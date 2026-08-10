@@ -220,6 +220,10 @@ static BOOL DKIsSessionRelatedDefaultsKey(NSString *key) {
     }
 
     // 备份 HTTP 头部
+    // 注意：authHeaders 中包含 __DK_ISOLATION_PLIST__ / __DK_FULL_DOMAIN__
+    // 等 DK 内部元数据键（用于会话恢复），不应被注入为 HTTP 头。
+    // NSURLSessionConfiguration Hook 中的 DKFilterAuthHeadersForHTTP()
+    // 会过滤这些键，仅注入合法的 HTTP 头。
     NSDictionary *headers = [self _captureAuthHeaders];
     if (headers) {
         sessionData[@"authHeaders"] = headers;

@@ -961,7 +961,39 @@ fetchCompletionHandler:(void (^)(UIBackgroundFetchResult))completionHandler {
 // ============================================================
 // Hook 5: NSURLSessionConfiguration - 网络配置隔离
 // 每个账号使用独立的 URLSession 配置
+//
+// ⚠️ 重要修复（MonkeyCode 登录失败根因）：
+// authHeaders 中包含 __DK_ISOLATION_PLIST__ / __DK_FULL_DOMAIN__
+// 等内部 DK 元数据键（值为 NSDictionary，非 NSString）。
+// 直接注入 HTTPAdditionalHeaders 会导致 NSURLSession 构造请求时
+// 出现非法 HTTP 头，服务器返回错误（"登录失败，请重试"）。
+//
+// 修复策略：
+//   1. 过滤所有 __DK_ 前缀的内部键，不注入为 HTTP 头
+//   2. 仅注入值为 NSString/NSData 的合法 HTTP 头
+//   3. MonkeyCode（React Native）完全跳过头部注入：
+//      RN 在 JS 层通过 fetch headers 管理 auth token，
+//      不依赖 NSURLSessionConfiguration.HTTPAdditionalHeaders
 // ============================================================
+
+/// 从 authHeaders 中过滤出合法的 HTTP 头
+/// 移除 __DK_ 前缀的内部元数据键和非字符串值
+static NSDictionary* DKFilterAuthHeadersForHTTP(NSDictionary *headers) {
+    if (!headers || headers.count == 0) return nil;
+
+    NSMutableDictionary *filtered = [NSMutableDictionary dictionary];
+    for (NSString *key in headers) {
+        // 跳过内部 DK 元数据键
+        if ([key hasPrefix:@"__DK_"]) continue;
+
+        id value = headers[key];
+        // HTTPAdditionalHeaders 只接受 NSString 或 NSData 值
+        if ([value isKindOfClass:[NSString class]] || [value isKindOfClass:[NSData class]]) {
+            filtered[key] = value;
+        }
+    }
+    return filtered.count > 0 ? [filtered copy] : nil;
+}
 
 %hook NSURLSessionConfiguration
 
@@ -969,6 +1001,10 @@ fetchCompletionHandler:(void (^)(UIBackgroundFetchResult))completionHandler {
     NSURLSessionConfiguration *config = %orig;
 
     if (_dkStartupGuard) return config;
+
+    // MonkeyCode（React Native）：完全跳过头部注入
+    // RN 在 JS 层管理 auth token，HTTPAdditionalHeaders 注入会干扰 API 请求
+    if (DKIsMonkeyCode()) return config;
 
     DKAccountManager *manager = [DKAccountManager sharedManager];
     NSString *currentAccount = [manager currentAccountName];
@@ -978,9 +1014,11 @@ fetchCompletionHandler:(void (^)(UIBackgroundFetchResult))completionHandler {
         NSDictionary *sessionData = [NSDictionary dictionaryWithContentsOfFile:sessionPath];
         NSDictionary *headers = sessionData[@"authHeaders"];
 
-        if (headers) {
+        // 过滤内部 DK 键，仅注入合法 HTTP 头
+        NSDictionary *validHeaders = DKFilterAuthHeadersForHTTP(headers);
+        if (validHeaders) {
             NSMutableDictionary *allHeaders = [config.HTTPAdditionalHeaders mutableCopy] ?: [NSMutableDictionary dictionary];
-            [allHeaders addEntriesFromDictionary:headers];
+            [allHeaders addEntriesFromDictionary:validHeaders];
             config.HTTPAdditionalHeaders = allHeaders;
         }
     }
@@ -993,6 +1031,9 @@ fetchCompletionHandler:(void (^)(UIBackgroundFetchResult))completionHandler {
 
     if (_dkStartupGuard) return config;
 
+    // MonkeyCode（React Native）：完全跳过头部注入
+    if (DKIsMonkeyCode()) return config;
+
     DKAccountManager *manager = [DKAccountManager sharedManager];
     NSString *currentAccount = [manager currentAccountName];
 
@@ -1001,9 +1042,10 @@ fetchCompletionHandler:(void (^)(UIBackgroundFetchResult))completionHandler {
         NSDictionary *sessionData = [NSDictionary dictionaryWithContentsOfFile:sessionPath];
         NSDictionary *headers = sessionData[@"authHeaders"];
 
-        if (headers) {
+        NSDictionary *validHeaders = DKFilterAuthHeadersForHTTP(headers);
+        if (validHeaders) {
             NSMutableDictionary *allHeaders = [config.HTTPAdditionalHeaders mutableCopy] ?: [NSMutableDictionary dictionary];
-            [allHeaders addEntriesFromDictionary:headers];
+            [allHeaders addEntriesFromDictionary:validHeaders];
             config.HTTPAdditionalHeaders = allHeaders;
         }
     }
