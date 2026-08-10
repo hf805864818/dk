@@ -1423,6 +1423,10 @@ static id hooked_sessionWithConfig(Class cls, SEL sel, NSURLSessionConfiguration
             NSLog(@"[DK] WKWebView cookie 和网站数据已清除（账号隔离）");
         }];
         NSLog(@"[DK] WKWebsiteDataStore 已标记清理（子账号 WebView 隔离）");
+        // ⚠️ 注意：清理是异步的。通过在 %ctor 第 3.5 步提前触发
+        // defaultDataStore 调用，确保清理在应用 UI 加载前就开始，
+        // 远早于用户点击登录触发 OAuth 流程。
+        // cleared 标志确保只清理一次，不会在 OAuth 设置 cookie 后再次清理。
     }
 
     return store;
@@ -1700,6 +1704,30 @@ static id hooked_sessionWithConfig(Class cls, SEL sel, NSURLSessionConfiguration
         NSLog(@"[DK] 启动保护已关闭，账号隔离 Hook 已激活");
 
         // ============================================
+        // 第 3.5 步：提前触发 WKWebView 数据清理（MonkeyCode 子账号）
+        //
+        // ⚠️ 关键修复：之前将清理放在第四步的 dispatch_async 中，
+        // 并且内部又嵌套了一层 dispatch_async，导致清理被三重延迟。
+        // 实际运行时，清理可能在用户已点击登录、OAuth 流程已设置
+        // WKWebView cookie 之后才执行，把 OAuth cookie 清掉，
+        // 导致「登录完成」后立即「登录失败」。
+        //
+        // 修复：在 %ctor 中直接调用 defaultDataStore，触发
+        // WKWebsiteDataStore Hook 的 dispatch_once 清理逻辑。
+        // 清理是异步的，但在 %ctor 中触发可以确保它在应用
+        // UI 加载之前就开始执行，远早于用户点击登录。
+        // ============================================
+        if (DKIsMonkeyCode() && isNonDefaultAccount) {
+            @try {
+                // 触发 WKWebsiteDataStore Hook 的 dispatch_once 清理
+                [WKWebsiteDataStore defaultDataStore];
+                NSLog(@"[DK] MonkeyCode 子账号 WKWebView 清理已提前触发");
+            } @catch (NSException *e) {
+                NSLog(@"[DK] ⚠️ 提前触发 WKWebView 清理失败: %@", e);
+            }
+        }
+
+        // ============================================
         // 第四步：初始化各模块（dispatch_async 到主线程，确保 UI 操作安全）
         // ============================================
         dispatch_async(dispatch_get_main_queue(), ^{
@@ -1734,24 +1762,16 @@ static id hooked_sessionWithConfig(Class cls, SEL sel, NSURLSessionConfiguration
                     }
                 }
 
-                // === MonkeyCode: 子账号启动时清除 WKWebView cookie ===
-                // MonkeyCode 登录流程使用 WKWebView (RNCWebView) 加载 Baizhi OAuth 页面。
-                // WKWebView 有独立的 cookie 存储，与 NSHTTPCookieStorage 隔离。
-                // 子账号启动时必须清除 WKWebView 的 cookie，否则服务器检测到
-                // 默认账号的已有会话，拒绝登录。
-                if (DKIsMonkeyCode() && isNonDefaultAccount) {
-                    dispatch_async(dispatch_get_main_queue(), ^{
-                        WKWebsiteDataStore *store = [WKWebsiteDataStore defaultDataStore];
-                        NSSet *dataTypes = [WKWebsiteDataStore allWebsiteDataTypes];
-                        NSDate *dateFrom = [NSDate dateWithTimeIntervalSince1970:0];
-                        [store removeDataOfTypes:dataTypes
-                                  modifiedSince:dateFrom
-                                 completionHandler:^{
-                            NSLog(@"[DK] MonkeyCode 子账号 WKWebView 数据已清除");
-                        }];
-                        NSLog(@"[DK] MonkeyCode 子账号 WKWebView 清理已触发");
-                    });
-                }
+                // === MonkeyCode: WKWebView cookie 清理已移至 %ctor 第 3.5 步 ===
+                // 之前在此处通过双重 dispatch_async 清理 WKWebView 数据，
+                // 但三重延迟导致清理可能在 OAuth 登录流程设置 cookie 之后
+                // 才执行，把 OAuth cookie 清掉，导致登录失败。
+                // 现在改为在 %ctor 中提前触发 WKWebsiteDataStore Hook
+                // 的 dispatch_once 清理逻辑，确保清理在应用 UI 加载前开始。
+                //
+                // WKWebsiteDataStore.defaultDataStore Hook（Hook 14）仍然保留，
+                // 作为安全网：如果 defaultDataStore 在 %ctor 之后才被首次调用，
+                // Hook 会自动触发清理。
 
                 NSLog(@"[DK] ✅ 所有模块初始化完成 (%@)", isWeChat ? @"微信" : (DKIsMonkeyCode() ? @"MonkeyCode" : @"TRAE"));
 

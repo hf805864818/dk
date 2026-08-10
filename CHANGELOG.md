@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.112] - 2026-08-10
+
+- fix: 修复 MonkeyCode 子账号 OAuth 登录后「登录失败」— WKWebView cookie 清理被三重延迟（双重 dispatch_async），导致清理在 OAuth 流程设置 cookie 后才执行，把 OAuth cookie 清掉
+- fix: 将 WKWebView 数据清理从第四步的 dispatch_async 移至 %ctor 第 3.5 步，确保清理在应用 UI 加载前触发
+- fix: 移除初始化代码中冗余的 WKWebView 清理，避免二次清理覆盖 OAuth cookie
+
+
 ## [1.0.111] - 2026-08-10
 
 - 7f0d99c fix: 修复 MonkeyCode 多开子账号登录失败
