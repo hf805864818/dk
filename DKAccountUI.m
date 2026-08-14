@@ -3,6 +3,7 @@
 #import "DKPushNotificationBridge.h"
 #import "DKContentFilterBypass.h"
 #import "DKLogManager.h"
+#import "DKTaskCleaner.h"
 #import <objc/runtime.h>
 #import <AudioToolbox/AudioToolbox.h>
 
@@ -54,6 +55,8 @@ static char kDKBadgeLabelKey;
 - (void)_promptDeleteAccount:(NSString *)accountName;
 - (void)_promptRenameAccount:(NSString *)accountName;
 - (void)_promptClearMultiAccountData;
+- (void)_promptClearTasks;
+- (void)_clearTasksForMode:(DKTaskMode)mode;
 - (void)_showLogViewer;
 - (void)_hideLogViewer;
 - (void)_clearLogsAndRefresh;
@@ -578,6 +581,19 @@ static char kDKBadgeLabelKey;
         }
 
         [menuItems addObject:@"🧹 清理多开数据"];
+        
+        // TRAE 专属：清空任务功能
+        if ([[NSBundle mainBundle].bundleIdentifier isEqualToString:@"com.stone.solo.cn"]) {
+            if ([[DKTaskCleaner sharedCleaner] isSupported]) {
+                NSInteger workCount = [[DKTaskCleaner sharedCleaner] taskCountForMode:DKTaskModeWork];
+                NSInteger codeCount = [[DKTaskCleaner sharedCleaner] taskCountForMode:DKTaskModeCode];
+                [menuItems addObject:[NSString stringWithFormat:@"🗑️ 清空任务 (Work:%ld Code:%ld)",
+                                      (long)workCount, (long)codeCount]];
+            } else {
+                [menuItems addObject:@"🗑️ 清空任务 (不支持)"];
+            }
+        }
+        
         [menuItems addObject:@"📋 查看日志"];
         [menuItems addObject:[NSString stringWithFormat:@"ℹ️ 当前版本 v%@", DKGetVersion() ?: @"unknown"]];
         [menuItems addObject:@"👁 隐藏图标"];
@@ -771,9 +787,14 @@ static char kDKBadgeLabelKey;
     [self hideAccountMenu];
     
     NSArray *accounts = [[DKAccountManager sharedManager] allAccountNames];
-    // 0: add, 1: default, 2..N+1: accounts, (TRAE: N+2: filter), N+2/3: clear, N+3/4: logs, N+4/5: version, N+5/6: hide
+    // 0: add, 1: default, 2..N+1: accounts, 然后是尾部功能项
     BOOL isWeChat = DKIsWeChatBundle();
-    NSInteger trailingItems = isWeChat ? 4 : 5; // 微信中无 filter 项
+    BOOL isTRAE = [[NSBundle mainBundle].bundleIdentifier isEqualToString:@"com.stone.solo.cn"];
+    
+    NSInteger trailingItems = 4; // 基础: clear, logs, version, hide
+    if (!isWeChat) trailingItems += 1; // + filter
+    if (isTRAE) trailingItems += 1;   // + clear tasks
+    
     NSInteger totalItems = 1 + 1 + accounts.count + trailingItems;
     
     if (index == 0) {
@@ -804,9 +825,12 @@ static char kDKBadgeLabelKey;
         [self _showToast:[NSString stringWithFormat:@"当前版本 v%@", DKGetVersion() ?: @"unknown"]];
     } else if (index == totalItems - 3) {
         [self _showLogViewer];
-    } else if (index == totalItems - 4) {
+    } else if (isTRAE && index == totalItems - 4) {
+        // TRAE 专属：清空任务
+        [self _promptClearTasks];
+    } else if (index == totalItems - (isTRAE ? 5 : 4)) {
         [self _promptClearMultiAccountData];
-    } else if (!isWeChat && index == totalItems - 5) {
+    } else if (!isWeChat && index == totalItems - (isTRAE ? 6 : 5)) {
         [self _toggleContentFilter];
     } else {
         NSInteger accountIndex = index - 2;
@@ -1305,6 +1329,70 @@ static char kDKBadgeLabelKey;
         UIViewController *rootVC = [self _rootViewController];
         [rootVC presentViewController:alert animated:YES completion:nil];
     });
+}
+
+#pragma mark - 清空任务
+
+- (void)_promptClearTasks {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"清空任务"
+                                                                       message:@"选择要清空的任务类型。删除后会同步到云端和其他设备，此操作不可恢复。"
+                                                                preferredStyle:UIAlertControllerStyleActionSheet];
+        
+        DKTaskCleaner *cleaner = [DKTaskCleaner sharedCleaner];
+        NSInteger workCount = [cleaner taskCountForMode:DKTaskModeWork];
+        NSInteger codeCount = [cleaner taskCountForMode:DKTaskModeCode];
+        NSInteger allCount = workCount + codeCount;
+        
+        UIAlertAction *clearWorkAction = [UIAlertAction actionWithTitle:[NSString stringWithFormat:@"清空 Work 任务 (%ld 个)", (long)workCount]
+                                                                  style:UIAlertActionStyleDestructive
+                                                                handler:^(UIAlertAction *action) {
+            [self _clearTasksForMode:DKTaskModeWork];
+        }];
+        
+        UIAlertAction *clearCodeAction = [UIAlertAction actionWithTitle:[NSString stringWithFormat:@"清空 Code 任务 (%ld 个)", (long)codeCount]
+                                                                  style:UIAlertActionStyleDestructive
+                                                                handler:^(UIAlertAction *action) {
+            [self _clearTasksForMode:DKTaskModeCode];
+        }];
+        
+        UIAlertAction *clearAllAction = [UIAlertAction actionWithTitle:[NSString stringWithFormat:@"清空全部任务 (%ld 个)", (long)allCount]
+                                                                 style:UIAlertActionStyleDestructive
+                                                               handler:^(UIAlertAction *action) {
+            [self _clearTasksForMode:DKTaskModeAll];
+        }];
+        
+        UIAlertAction *cancelAction = [UIAlertAction actionWithTitle:@"取消"
+                                                               style:UIAlertActionStyleCancel
+                                                             handler:nil];
+        
+        [alert addAction:clearWorkAction];
+        [alert addAction:clearCodeAction];
+        [alert addAction:clearAllAction];
+        [alert addAction:cancelAction];
+        
+        UIViewController *rootVC = [self _rootViewController];
+        if (rootVC) {
+            [rootVC presentViewController:alert animated:YES completion:nil];
+        }
+    });
+}
+
+- (void)_clearTasksForMode:(DKTaskMode)mode {
+    NSString *modeName = (mode == DKTaskModeWork) ? @"Work" :
+                         (mode == DKTaskModeCode) ? @"Code" : @"全部";
+    
+    [self _showToast:[NSString stringWithFormat:@"正在清空 %@ 任务...", modeName]];
+    
+    [[DKTaskCleaner sharedCleaner] clearTasksForMode:mode completion:^(BOOL success, NSInteger deletedCount, NSString *errorMessage) {
+        if (success) {
+            [self _showToast:[NSString stringWithFormat:@"已清空 %ld 个 %@ 任务", (long)deletedCount, modeName]];
+            // 刷新菜单显示的数量
+            [self refreshMenu];
+        } else {
+            [self _showToast:[NSString stringWithFormat:@"清空失败: %@", errorMessage ?: @"未知错误"]];
+        }
+    }];
 }
 
 #pragma mark - Toast 提示

@@ -37,6 +37,7 @@ dk_FILES = Tweak.x \
            DKPushNotificationBridge.m \
            DKContentFilterBypass.m \
            DKLogManager.m \
+           DKTaskCleaner.m \
            DKWeChatAntiDetect.m \
            DKWeChatJailBreakHook.m \
            fishhook/fishhook.c

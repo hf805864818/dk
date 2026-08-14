@@ -33,6 +33,7 @@
 #import "DKPushNotificationBridge.h"
 #import "DKContentFilterBypass.h"
 #import "DKLogManager.h"
+#import "DKTaskCleaner.h"
 #import "DKWeChatAntiDetect.h"
 #import "DKWeChatJailBreakHook.h"
 
