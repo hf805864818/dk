@@ -1,16 +1,12 @@
 #import "DKTaskCleaner.h"
 #import <objc/runtime.h>
 #import <objc/message.h>
-#import "DKLogManager.h"
 
 // ============================================================
-// 日志宏
+// 日志宏 - 直接用 NSLog，DKLogManager 会自动捕获
 // ============================================================
 #define DKTaskLog(fmt, ...) \
-    do { \
-        NSString *msg = [NSString stringWithFormat:@"[DKTaskCleaner] " fmt, ##__VA_ARGS__]; \
-        [[DKLogManager sharedInstance] logMessage:msg fromModule:@"DKTaskCleaner"]; \
-    } while(0)
+    NSLog(@"[DKTaskCleaner] " fmt, ##__VA_ARGS__)
 
 @interface DKTaskCleaner ()
 @property (nonatomic, assign) BOOL isSupported;
@@ -54,20 +50,20 @@
     return _isSupported;
 }
 
-- (NSInteger)workTaskCount {
-    return [self _taskCountForMode:@"work"];
+- (NSInteger)taskCountForMode:(DKTaskMode)mode {
+    if (!_hasDetected) {
+        [self _detect];
+    }
+    if (!_isSupported) return 0;
+    return [self _fetchConversationsForMode:mode].count;
 }
 
-- (NSInteger)codeTaskCount {
-    return [self _taskCountForMode:@"code"];
-}
-
-- (void)clearTasksWithMode:(DKTaskClearMode)mode
-                completion:(void (^)(BOOL, NSInteger))completion {
+- (void)clearTasksForMode:(DKTaskMode)mode
+               completion:(void (^)(BOOL, NSInteger, NSString *))completion {
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         if (!self->_isSupported) {
             dispatch_async(dispatch_get_main_queue(), ^{
-                if (completion) completion(NO, 0);
+                if (completion) completion(NO, 0, @"功能不支持");
             });
             return;
         }
@@ -82,10 +78,12 @@
             @try {
                 NSString *convId = nil;
                 if (self.conversationIdKeyPath) {
-                    convId = [conv valueForKeyPath:self.conversationIdKeyPath];
+                    id val = [conv valueForKeyPath:self.conversationIdKeyPath];
+                    if ([val isKindOfClass:[NSString class]]) {
+                        convId = val;
+                    }
                 }
                 if (!convId) {
-                    // 尝试常见属性名
                     convId = [conv valueForKey:@"identifier"];
                 }
                 if (!convId) {
@@ -110,7 +108,7 @@
         [self _postUpdateNotification];
         
         dispatch_async(dispatch_get_main_queue(), ^{
-            if (completion) completion(deletedCount > 0, deletedCount);
+            if (completion) completion(deletedCount > 0, deletedCount, nil);
         });
     });
 }
@@ -176,7 +174,7 @@
     // 如果预设候选都没找到，枚举所有类
     if (!foundClass) {
         DKTaskLog(@"  预设候选未找到，开始全类枚举搜索...");
-        foundClass = [self _enumerateClassesForConversationStore:&foundInstance];
+        foundClass = [self _enumerateClassesForConversationStoreWithInstance:&foundInstance];
     }
     
     if (foundClass && foundInstance) {
@@ -246,7 +244,7 @@
     return nil;
 }
 
-- (Class)_enumerateClassesForConversationStore:(id **)outInstance {
+- (Class)_enumerateClassesForConversationStoreWithInstance:(id *)outInstance {
     int numClasses = objc_getClassList(NULL, 0);
     if (numClasses <= 0) return nil;
     
@@ -315,7 +313,9 @@
     free(classes);
     
     if (bestClass && bestInstance) {
-        *outInstance = bestInstance;
+        if (outInstance != NULL) {
+            *outInstance = bestInstance;
+        }
         return bestClass;
     }
     return nil;
@@ -443,14 +443,14 @@
     }
 }
 
-- (NSArray *)_fetchConversationsForMode:(DKTaskClearMode)mode {
+- (NSArray *)_fetchConversationsForMode:(DKTaskMode)mode {
     NSArray *allConvs = [self _fetchAllConversations];
-    if (mode == DKTaskClearModeAll) {
+    if (mode == DKTaskModeAll) {
         return allConvs;
     }
     
     NSMutableArray *filtered = [NSMutableArray array];
-    NSString *targetMode = (mode == DKTaskClearModeWork) ? @"work" : @"code";
+    NSString *targetMode = (mode == DKTaskModeWork) ? @"work" : @"code";
     
     for (id conv in allConvs) {
         @try {
@@ -466,7 +466,7 @@
             
             // 如果没找到mode属性，假设所有会话都是work模式（保守处理）
             if (!_conversationModeKeyPath) {
-                if (mode == DKTaskClearModeWork) {
+                if (mode == DKTaskModeWork) {
                     [filtered addObject:conv];
                 }
                 continue;
@@ -483,22 +483,6 @@
     return filtered;
 }
 
-- (NSInteger)_taskCountForMode:(NSString *)modeName {
-    if (!_hasDetected) {
-        [self _detect];
-    }
-    if (!_isSupported) return 0;
-    
-    DKTaskClearMode mode = DKTaskClearModeAll;
-    if ([modeName.lowercaseString isEqualToString:@"work"]) {
-        mode = DKTaskClearModeWork;
-    } else if ([modeName.lowercaseString isEqualToString:@"code"]) {
-        mode = DKTaskClearModeCode;
-    }
-    
-    return [self _fetchConversationsForMode:mode].count;
-}
-
 - (void)_deleteConversationWithId:(NSString *)convId {
     if (!_storeInstance || !_deleteConversationSelectorName || !convId) {
         return;
@@ -510,28 +494,13 @@
     }
     
     @try {
-        // 尝试不同的方法签名
-        // 1. deleteConversationWithId:
-        // 2. deleteConversation:
-        // 3. removeConversation:
-        // 4. 删除方法带 completion block
-        
         NSMethodSignature *sig = [_storeInstance methodSignatureForSelector:selector];
         NSInvocation *invocation = [NSInvocation invocationWithMethodSignature:sig];
         invocation.target = _storeInstance;
         invocation.selector = selector;
         
-        // 根据方法名猜测参数
-        NSString *lower = _deleteConversationSelectorName.lowercaseString;
-        if ([lower containsString:@"withid"] ||
-            [lower containsString:@"identifier"] ||
-            [lower containsString:@"id:"]) {
-            // 第一个参数是 ID
-            [invocation setArgument:&convId atIndex:2];
-        } else {
-            // 第一个参数可能是会话对象，尝试传 ID 也试试
-            [invocation setArgument:&convId atIndex:2];
-        }
+        // 第一个参数设为 convId
+        [invocation setArgument:&convId atIndex:2];
         
         [invocation invoke];
     } @catch (NSException *e) {
@@ -546,7 +515,6 @@
         @"SLConversationListDidUpdateNotification",
         @"AFConversationListDidChangeNotification",
         @"ConversationListDidUpdateNotification",
-        @"NSCurrentLocaleDidChangeNotification",  // fallback 不相关，仅占位
     ];
     
     for (NSString *name in notifNames) {
