@@ -651,7 +651,6 @@ static NSArray *DKSessionManagerClassCandidates(void) {
         
         // 尝试已知的通知名
         NSArray *notifNames = @[
-            kDKUpdateConversationListNotification,
             @"kUpdateConversationListNotification",
             @"SLConversationListDidUpdateNotification",
             @"SLTaskListDidUpdateNotification",
