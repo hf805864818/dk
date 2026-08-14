@@ -5,11 +5,46 @@
 
 // ============================================================
 // 内部方法名常量
-// Swift 类在 Objective-C runtime 中的 mangled 名称
+// Swift 类在 Objective-C runtime 中的名称
+// 可能的格式：mangled name / 模块名.类名 / @objc 重命名
 // ============================================================
-static NSString *const kDKSLIMConversationRepositoryClass = @"_TtC7SLIMKit26SLIMConversationRepository";
-static NSString *const kDKSLIMConversationTableClass      = @"_TtC7SLIMKit21SLIMConversationTable";
-static NSString *const kDKUpdateConversationListNotification = @"kUpdateConversationListNotification";
+static NSArray *DKRepositoryClassCandidates(void) {
+    static NSArray *candidates = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        candidates = @[
+            // mangled name（旧格式）
+            @"_TtC7SLIMKit26SLIMConversationRepository",
+            // mangled name（新 Swift 5+ 格式，模块名长度 + 模块名 + 类名长度 + 类名）
+            @"$s7SLIMKit26SLIMConversationRepositoryC",
+            @"$s7SLIMKit26SLIMConversationRepositoryCMa",
+            // 模块.类名 格式
+            @"SLIMKit.SLIMConversationRepository",
+            @"SLIMKit.SLConversationRepository",
+            // 纯类名（如果被 @objc 导出）
+            @"SLIMConversationRepository",
+            @"SLConversationRepository",
+            // 其他可能
+            @"_TtC7SLIMKit21SLIMConversationTable",
+            @"SLIMKit.SLIMConversationTable",
+        ];
+    });
+    return candidates;
+}
+
+static NSArray *DKSessionManagerClassCandidates(void) {
+    static NSArray *candidates = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        candidates = @[
+            @"_TtC7SLIMKit20SLTaskSessionManager",
+            @"$s7SLIMKit20SLTaskSessionManagerC",
+            @"SLIMKit.SLTaskSessionManager",
+            @"SLTaskSessionManager",
+        ];
+    });
+    return candidates;
+}
 
 // 日志宏
 #define DKTaskLog(fmt, ...) \
@@ -30,6 +65,9 @@ static NSString *const kDKUpdateConversationListNotification = @"kUpdateConversa
 
 /// 尝试获取 SLIMConversationRepository 单例
 - (BOOL)_ensureRepository;
+
+/// 尝试用指定类建立仓库
+- (BOOL)_trySetupRepositoryClass:(Class)cls;
 
 /// 获取所有会话
 - (NSArray *)_fetchAllConversations;
@@ -88,56 +126,145 @@ static NSString *const kDKUpdateConversationListNotification = @"kUpdateConversa
         return YES;
     }
     
-    _repoClass = NSClassFromString(kDKSLIMConversationRepositoryClass);
+    // 第一步：尝试已知的候选类名
+    for (NSString *className in DKRepositoryClassCandidates()) {
+        Class cls = NSClassFromString(className);
+        if (cls) {
+            DKTaskLog(@"Found candidate class: %@ (via name %@)", NSStringFromClass(cls), className);
+            if ([self _trySetupRepositoryClass:cls]) {
+                return YES;
+            }
+        }
+    }
     
-    if (!_repoClass) {
-        DKTaskLog(@"ERROR: SLIMConversationRepository class not found (%@)", kDKSLIMConversationRepositoryClass);
-        _isSupported = NO;
+    // 第二步：运行时枚举所有类，搜索包含 "Conversation" 和 "Repository/Store/Manager" 的类
+    DKTaskLog(@"Candidate names not found, enumerating all classes...");
+    int numClasses = objc_getClassList(NULL, 0);
+    if (numClasses > 0) {
+        Class *classes = (Class *)malloc(sizeof(Class) * numClasses);
+        numClasses = objc_getClassList(classes, numClasses);
+        
+        for (int i = 0; i < numClasses; i++) {
+            Class cls = classes[i];
+            NSString *className = NSStringFromClass(cls);
+            
+            // 搜索包含 Conversation + Repository/Store/DB/Database 的类
+            BOOL hasConversation = [className.lowercaseString containsString:@"conversation"];
+            BOOL hasRepo = [className.lowercaseString containsString:@"repository"] ||
+                           [className.lowercaseString containsString:@"store"] ||
+                           [className.lowercaseString containsString:@"database"] ||
+                           [className.lowercaseString containsString:@"dbmanager"] ||
+                           [className.lowercaseString containsString:@"dao"];
+            
+            if (hasConversation && hasRepo) {
+                DKTaskLog(@"Found conversation repository candidate: %@", className);
+                if ([self _trySetupRepositoryClass:cls]) {
+                    free(classes);
+                    return YES;
+                }
+            }
+        }
+        
+        // 如果没找到 Repository，试试找带 Task 和 Manager 的
+        for (int i = 0; i < numClasses; i++) {
+            Class cls = classes[i];
+            NSString *className = NSStringFromClass(cls);
+            
+            BOOL hasTask = [className.lowercaseString containsString:@"task"];
+            BOOL hasManager = [className.lowercaseString containsString:@"manager"] ||
+                            [className.lowercaseString containsString:@"session"];
+            
+            if (hasTask && hasManager) {
+                DKTaskLog(@"Found task manager candidate: %@", className);
+            }
+        }
+        
+        free(classes);
+    }
+    
+    DKTaskLog(@"ERROR: Could not find any conversation repository class");
+    _isSupported = NO;
+    return NO;
+}
+
+- (BOOL)_trySetupRepositoryClass:(Class)cls {
+    // 检查这个类是否有获取会话列表的能力
+    NSArray *methods = [self _methodListForClass:cls];
+    BOOL hasGetConversation = NO;
+    BOOL hasDeleteConversation = NO;
+    
+    for (NSString *method in methods) {
+        NSString *lower = method.lowercaseString;
+        if ([lower containsString:@"conversation"] &&
+            ([lower containsString:@"get"] ||
+             [lower containsString:@"all"] ||
+             [lower containsString:@"list"] ||
+             [lower containsString:@"fetch"])) {
+            hasGetConversation = YES;
+        }
+        if ([lower containsString:@"conversation"] &&
+            ([lower containsString:@"delete"] ||
+             [lower containsString:@"remove"] ||
+             [lower containsString:@"clear"])) {
+            hasDeleteConversation = YES;
+        }
+    }
+    
+    if (!hasGetConversation) {
+        DKTaskLog(@"  Skip %@: no conversation getter found", NSStringFromClass(cls));
         return NO;
     }
     
-    DKTaskLog(@"Found SLIMConversationRepository class: %@", NSStringFromClass(_repoClass));
+    DKTaskLog(@"  Class %@ looks promising (hasGet=%d, hasDelete=%d)",
+              NSStringFromClass(cls), hasGetConversation, hasDeleteConversation);
     
     // 尝试获取单例
-    SEL sharedSelector = NSSelectorFromString(@"shared");
-    SEL sharedManagerSelector = NSSelectorFromString(@"sharedManager");
-    SEL sharedInstanceSelector = NSSelectorFromString(@"sharedInstance");
-    SEL defaultSelector = NSSelectorFromString(@"defaultRepository");
+    SEL sharedSelectors[] = {
+        @selector(shared),
+        @selector(sharedManager),
+        @selector(sharedInstance),
+        @selector(defaultRepository),
+        @selector(defaultManager),
+        @selector(defaultStore),
+        @selector(sharedRepository),
+    };
     
-    SEL singletonSelector = nil;
-    if ([_repoClass respondsToSelector:sharedSelector]) {
-        singletonSelector = sharedSelector;
-    } else if ([_repoClass respondsToSelector:sharedManagerSelector]) {
-        singletonSelector = sharedManagerSelector;
-    } else if ([_repoClass respondsToSelector:sharedInstanceSelector]) {
-        singletonSelector = sharedInstanceSelector;
-    } else if ([_repoClass respondsToSelector:defaultSelector]) {
-        singletonSelector = defaultSelector;
+    for (int i = 0; i < sizeof(sharedSelectors)/sizeof(SEL); i++) {
+        SEL sel = sharedSelectors[i];
+        if ([cls respondsToSelector:sel]) {
+            DKTaskLog(@"  Found singleton method: %@", NSStringFromSelector(sel));
+            
+            IMP imp = [cls methodForSelector:sel];
+            id (*func)(id, SEL) = (void *)imp;
+            id instance = func(cls, sel);
+            
+            if (instance) {
+                _repoClass = cls;
+                _repoInstance = instance;
+                _isSupported = YES;
+                DKTaskLog(@"  Successfully got instance: %@", instance);
+                return YES;
+            }
+        }
     }
     
-    if (!singletonSelector) {
-        DKTaskLog(@"ERROR: No singleton method found on SLIMConversationRepository");
-        DKTaskLog(@"Class methods: %@", [self _methodListForClass:_repoClass]);
-        _isSupported = NO;
-        return NO;
+    // 尝试 alloc/init
+    if ([cls instancesRespondToSelector:@selector(init)]) {
+        @try {
+            id instance = [[cls alloc] init];
+            if (instance) {
+                _repoClass = cls;
+                _repoInstance = instance;
+                _isSupported = YES;
+                DKTaskLog(@"  Created instance via alloc/init: %@", instance);
+                return YES;
+            }
+        } @catch (NSException *e) {
+            DKTaskLog(@"  alloc/init failed: %@", e);
+        }
     }
     
-    DKTaskLog(@"Using singleton method: %@", NSStringFromSelector(singletonSelector));
-    
-    // 调用单例方法
-    IMP imp = [_repoClass methodForSelector:singletonSelector];
-    id (*func)(id, SEL) = (void *)imp;
-    _repoInstance = func(_repoClass, singletonSelector);
-    
-    if (!_repoInstance) {
-        DKTaskLog(@"ERROR: Failed to get SLIMConversationRepository singleton");
-        _isSupported = NO;
-        return NO;
-    }
-    
-    DKTaskLog(@"Got SLIMConversationRepository instance: %@", _repoInstance);
-    _isSupported = YES;
-    return YES;
+    return NO;
 }
 
 - (NSInteger)taskCountForMode:(DKTaskMode)mode {
@@ -548,35 +675,65 @@ static NSString *const kDKUpdateConversationListNotification = @"kUpdateConversa
 - (void)dumpRuntimeInfo {
     DKTaskLog(@"========== DKTaskCleaner Runtime Info ==========");
     
-    // 检查 SLIMConversationRepository
-    Class repoClass = NSClassFromString(kDKSLIMConversationRepositoryClass);
-    if (repoClass) {
-        DKTaskLog(@"[OK] SLIMConversationRepository class found: %@", NSStringFromClass(repoClass));
-        DKTaskLog(@"  Methods: %@", [self _methodListForClass:repoClass]);
-    } else {
-        DKTaskLog(@"[FAIL] SLIMConversationRepository class NOT found");
-    }
-    
-    // 检查 SLIMConversationTable
-    Class tableClass = NSClassFromString(kDKSLIMConversationTableClass);
-    if (tableClass) {
-        DKTaskLog(@"[OK] SLIMConversationTable class found: %@", NSStringFromClass(tableClass));
-        DKTaskLog(@"  Properties: %@", [self _methodListForClass:tableClass]);
-    } else {
-        DKTaskLog(@"[FAIL] SLIMConversationTable class NOT found");
-    }
-    
-    // 检查 SLTaskSessionManager
-    Class sessionMgrClass = NSClassFromString(@"_TtC7SLIMKit20SLTaskSessionManager");
-    if (sessionMgrClass) {
-        DKTaskLog(@"[OK] SLTaskSessionManager class found");
-        DKTaskLog(@"  Methods: %@", [self _methodListForClass:sessionMgrClass]);
-    } else {
-        DKTaskLog(@"[FAIL] SLTaskSessionManager class NOT found");
+    // 枚举所有类，找出和 conversation/task 相关的
+    int numClasses = objc_getClassList(NULL, 0);
+    if (numClasses > 0) {
+        Class *classes = (Class *)malloc(sizeof(Class) * numClasses);
+        numClasses = objc_getClassList(classes, numClasses);
+        
+        NSMutableArray *conversationClasses = [NSMutableArray array];
+        NSMutableArray *taskClasses = [NSMutableArray array];
+        NSMutableArray *slimClasses = [NSMutableArray array];
+        
+        for (int i = 0; i < numClasses; i++) {
+            Class cls = classes[i];
+            NSString *className = NSStringFromClass(cls);
+            NSString *lower = className.lowercaseString;
+            
+            if ([lower containsString:@"conversation"]) {
+                [conversationClasses addObject:className];
+            }
+            if ([lower containsString:@"task"] &&
+                ([lower containsString:@"manager"] ||
+                 [lower containsString:@"session"] ||
+                 [lower containsString:@"store"] ||
+                 [lower containsString:@"repository"] ||
+                 [lower containsString:@"viewmodel"])) {
+                [taskClasses addObject:className];
+            }
+            if ([lower containsString:@"slim"] &&
+                ([lower containsString:@"db"] ||
+                 [lower containsString:@"database"] ||
+                 [lower containsString:@"store"] ||
+                 [lower containsString:@"repo"])) {
+                [slimClasses addObject:className];
+            }
+        }
+        
+        free(classes);
+        
+        DKTaskLog(@"--- Conversation-related classes (%lu) ---", (unsigned long)conversationClasses.count);
+        for (NSString *name in conversationClasses) {
+            DKTaskLog(@"  %@", name);
+        }
+        
+        DKTaskLog(@"--- Task manager/repo classes (%lu) ---", (unsigned long)taskClasses.count);
+        for (NSString *name in taskClasses) {
+            DKTaskLog(@"  %@", name);
+        }
+        
+        DKTaskLog(@"--- SLIM DB/Store classes (%lu) ---", (unsigned long)slimClasses.count);
+        for (NSString *name in slimClasses) {
+            DKTaskLog(@"  %@", name);
+        }
     }
     
     // 尝试获取仓库实例并获取会话
     if ([self _ensureRepository]) {
+        DKTaskLog(@"--- Repository found: %@ ---", NSStringFromClass(_repoClass));
+        DKTaskLog(@"Instance: %@", _repoInstance);
+        DKTaskLog(@"Methods: %@", [self _methodListForClass:_repoClass]);
+        
         NSArray *convs = [self _fetchAllConversations];
         DKTaskLog(@"Conversations count: %lu", (unsigned long)convs.count);
         
@@ -596,6 +753,8 @@ static NSString *const kDKUpdateConversationListNotification = @"kUpdateConversa
             free(props);
             DKTaskLog(@"First conversation properties: %@", propNames);
         }
+    } else {
+        DKTaskLog(@"--- Repository NOT found ---");
     }
     
     DKTaskLog(@"=================================================");
