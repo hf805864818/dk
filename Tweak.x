@@ -1753,11 +1753,8 @@ static id hooked_sessionWithConfig(Class cls, SEL sel, NSURLSessionConfiguration
                     [[DKContentFilterBypass sharedInstance] setup];
                     [[DKNetworkSessionManager sharedManager] scheduleSessionRefresh];
                     
-                    // 任务清空器：启动后延迟探测运行时环境并输出诊断日志
-                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
-                                   dispatch_get_main_queue(), ^{
-                        [[DKTaskCleaner sharedCleaner] dumpRuntimeInfo];
-                    });
+                    // 注意：DKTaskCleaner 不自动启动探测，避免干扰应用初始化
+                    // 只有用户点击菜单时才会触发探测
 
                     // 启动时不主动快照默认账号。
                     DKAccountManager *manager = [DKAccountManager sharedManager];

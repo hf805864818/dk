@@ -4,89 +4,23 @@
 #import "DKLogManager.h"
 
 // ============================================================
-// 内部方法名常量
-// Swift 类在 Objective-C runtime 中的名称
-// 可能的格式：mangled name / 模块名.类名 / @objc 重命名
-// ============================================================
-static NSArray *DKRepositoryClassCandidates(void) {
-    static NSArray *candidates = nil;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        candidates = @[
-            // mangled name（旧格式）
-            @"_TtC7SLIMKit26SLIMConversationRepository",
-            // mangled name（新 Swift 5+ 格式，模块名长度 + 模块名 + 类名长度 + 类名）
-            @"$s7SLIMKit26SLIMConversationRepositoryC",
-            @"$s7SLIMKit26SLIMConversationRepositoryCMa",
-            // 模块.类名 格式
-            @"SLIMKit.SLIMConversationRepository",
-            @"SLIMKit.SLConversationRepository",
-            // 纯类名（如果被 @objc 导出）
-            @"SLIMConversationRepository",
-            @"SLConversationRepository",
-            // 其他可能
-            @"_TtC7SLIMKit21SLIMConversationTable",
-            @"SLIMKit.SLIMConversationTable",
-        ];
-    });
-    return candidates;
-}
-
-static NSArray *DKSessionManagerClassCandidates(void) {
-    static NSArray *candidates = nil;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        candidates = @[
-            @"_TtC7SLIMKit20SLTaskSessionManager",
-            @"$s7SLIMKit20SLTaskSessionManagerC",
-            @"SLIMKit.SLTaskSessionManager",
-            @"SLTaskSessionManager",
-        ];
-    });
-    return candidates;
-}
-
 // 日志宏
+// ============================================================
 #define DKTaskLog(fmt, ...) \
     do { \
         NSString *msg = [NSString stringWithFormat:@"[DKTaskCleaner] " fmt, ##__VA_ARGS__]; \
-        NSLog(@"%@", msg); \
-        if ([[DKLogManager sharedInstance] respondsToSelector:@selector(logCount)]) { \
-            /* 日志会被 NSLog Hook 自动捕获 */ \
-        } \
+        [[DKLogManager sharedInstance] logMessage:msg fromModule:@"DKTaskCleaner"]; \
     } while(0)
 
-@interface DKTaskCleaner () {
-    Class _repoClass;
-    id _repoInstance;
-    BOOL _checkedSupported;
-    BOOL _isSupported;
-}
-
-/// 尝试获取 SLIMConversationRepository 单例
-- (BOOL)_ensureRepository;
-
-/// 尝试用指定类建立仓库
-- (BOOL)_trySetupRepositoryClass:(Class)cls;
-
-/// 获取所有会话
-- (NSArray *)_fetchAllConversations;
-
-/// 从会话对象中获取 mode 字段
-- (NSString *)_modeFromConversation:(id)conversation;
-
-/// 从会话对象中获取 ID
-- (NSString *)_conversationId:(id)conversation;
-
-/// 删除单个会话（通过业务层方法，会触发网络请求）
-- (BOOL)_deleteConversationWithId:(NSString *)conversationId;
-
-/// 发送会话列表更新通知
-- (void)_postUpdateNotification;
-
-/// 枚举类的所有方法（调试用）
-- (NSArray<NSString *> *)_methodListForClass:(Class)cls;
-
+@interface DKTaskCleaner ()
+@property (nonatomic, assign) BOOL isSupported;
+@property (nonatomic, assign) BOOL hasDetected;
+@property (nonatomic, strong) id storeInstance;
+@property (nonatomic, strong) Class storeClass;
+@property (nonatomic, strong) NSString *getAllConversationsSelectorName;
+@property (nonatomic, strong) NSString *deleteConversationSelectorName;
+@property (nonatomic, strong) NSString *conversationIdKeyPath;
+@property (nonatomic, strong) NSString *conversationModeKeyPath;
 @end
 
 @implementation DKTaskCleaner
@@ -103,688 +37,525 @@ static NSArray *DKSessionManagerClassCandidates(void) {
 - (instancetype)init {
     self = [super init];
     if (self) {
-        _repoClass = nil;
-        _repoInstance = nil;
-        _checkedSupported = NO;
         _isSupported = NO;
+        _hasDetected = NO;
+        _storeInstance = nil;
+        _storeClass = nil;
     }
     return self;
 }
 
-- (BOOL)isSupported {
-    if (!_checkedSupported) {
-        [self _ensureRepository];
-        _checkedSupported = YES;
+#pragma mark - Public Methods
+
+- (BOOL)isTaskCleanerSupported {
+    if (!_hasDetected) {
+        [self _detect];
     }
     return _isSupported;
 }
 
-#pragma mark - 核心方法
-
-- (BOOL)_ensureRepository {
-    if (_repoInstance && _repoClass) {
-        return YES;
-    }
-    
-    // 第一步：尝试已知的候选类名
-    for (NSString *className in DKRepositoryClassCandidates()) {
-        Class cls = NSClassFromString(className);
-        if (cls) {
-            DKTaskLog(@"Found candidate class: %@ (via name %@)", NSStringFromClass(cls), className);
-            if ([self _trySetupRepositoryClass:cls]) {
-                return YES;
-            }
-        }
-    }
-    
-    // 第二步：运行时枚举所有类，搜索包含 "Conversation" 和 "Repository/Store/Manager" 的类
-    DKTaskLog(@"Candidate names not found, enumerating all classes...");
-    int numClasses = objc_getClassList(NULL, 0);
-    if (numClasses > 0) {
-        Class *classes = (Class *)malloc(sizeof(Class) * numClasses);
-        numClasses = objc_getClassList(classes, numClasses);
-        
-        for (int i = 0; i < numClasses; i++) {
-            Class cls = classes[i];
-            NSString *className = NSStringFromClass(cls);
-            
-            // 搜索包含 Conversation + Repository/Store/DB/Database 的类
-            BOOL hasConversation = [className.lowercaseString containsString:@"conversation"];
-            BOOL hasRepo = [className.lowercaseString containsString:@"repository"] ||
-                           [className.lowercaseString containsString:@"store"] ||
-                           [className.lowercaseString containsString:@"database"] ||
-                           [className.lowercaseString containsString:@"dbmanager"] ||
-                           [className.lowercaseString containsString:@"dao"];
-            
-            if (hasConversation && hasRepo) {
-                DKTaskLog(@"Found conversation repository candidate: %@", className);
-                if ([self _trySetupRepositoryClass:cls]) {
-                    free(classes);
-                    return YES;
-                }
-            }
-        }
-        
-        // 如果没找到 Repository，试试找带 Task 和 Manager 的
-        for (int i = 0; i < numClasses; i++) {
-            Class cls = classes[i];
-            NSString *className = NSStringFromClass(cls);
-            
-            BOOL hasTask = [className.lowercaseString containsString:@"task"];
-            BOOL hasManager = [className.lowercaseString containsString:@"manager"] ||
-                            [className.lowercaseString containsString:@"session"];
-            
-            if (hasTask && hasManager) {
-                DKTaskLog(@"Found task manager candidate: %@", className);
-            }
-        }
-        
-        free(classes);
-    }
-    
-    DKTaskLog(@"ERROR: Could not find any conversation repository class");
-    _isSupported = NO;
-    return NO;
+- (NSInteger)workTaskCount {
+    return [self _taskCountForMode:@"work"];
 }
 
-- (BOOL)_trySetupRepositoryClass:(Class)cls {
-    // 检查这个类是否有获取会话列表的能力
-    NSArray *methods = [self _methodListForClass:cls];
-    BOOL hasGetConversation = NO;
-    BOOL hasDeleteConversation = NO;
-    
-    for (NSString *method in methods) {
-        NSString *lower = method.lowercaseString;
-        if ([lower containsString:@"conversation"] &&
-            ([lower containsString:@"get"] ||
-             [lower containsString:@"all"] ||
-             [lower containsString:@"list"] ||
-             [lower containsString:@"fetch"])) {
-            hasGetConversation = YES;
-        }
-        if ([lower containsString:@"conversation"] &&
-            ([lower containsString:@"delete"] ||
-             [lower containsString:@"remove"] ||
-             [lower containsString:@"clear"])) {
-            hasDeleteConversation = YES;
-        }
-    }
-    
-    if (!hasGetConversation) {
-        DKTaskLog(@"  Skip %@: no conversation getter found", NSStringFromClass(cls));
-        return NO;
-    }
-    
-    DKTaskLog(@"  Class %@ looks promising (hasGet=%d, hasDelete=%d)",
-              NSStringFromClass(cls), hasGetConversation, hasDeleteConversation);
-    
-    // 尝试获取单例
-    SEL sharedSelectors[] = {
-        @selector(shared),
-        @selector(sharedManager),
-        @selector(sharedInstance),
-        @selector(defaultRepository),
-        @selector(defaultManager),
-        @selector(defaultStore),
-        @selector(sharedRepository),
-    };
-    
-    for (int i = 0; i < sizeof(sharedSelectors)/sizeof(SEL); i++) {
-        SEL sel = sharedSelectors[i];
-        if ([cls respondsToSelector:sel]) {
-            DKTaskLog(@"  Found singleton method: %@", NSStringFromSelector(sel));
-            
-            IMP imp = [cls methodForSelector:sel];
-            id (*func)(id, SEL) = (void *)imp;
-            id instance = func(cls, sel);
-            
-            if (instance) {
-                _repoClass = cls;
-                _repoInstance = instance;
-                _isSupported = YES;
-                DKTaskLog(@"  Successfully got instance: %@", instance);
-                return YES;
-            }
-        }
-    }
-    
-    // 尝试 alloc/init
-    if ([cls instancesRespondToSelector:@selector(init)]) {
-        @try {
-            id instance = [[cls alloc] init];
-            if (instance) {
-                _repoClass = cls;
-                _repoInstance = instance;
-                _isSupported = YES;
-                DKTaskLog(@"  Created instance via alloc/init: %@", instance);
-                return YES;
-            }
-        } @catch (NSException *e) {
-            DKTaskLog(@"  alloc/init failed: %@", e);
-        }
-    }
-    
-    return NO;
+- (NSInteger)codeTaskCount {
+    return [self _taskCountForMode:@"code"];
 }
 
-- (NSInteger)taskCountForMode:(DKTaskMode)mode {
-    if (![self _ensureRepository]) {
-        return 0;
-    }
-    
-    NSArray *conversations = [self _fetchAllConversations];
-    if (!conversations || conversations.count == 0) {
-        return 0;
-    }
-    
-    if (mode == DKTaskModeAll) {
-        return conversations.count;
-    }
-    
-    NSString *targetMode = (mode == DKTaskModeWork) ? @"work" : @"code";
-    NSInteger count = 0;
-    
-    for (id conv in conversations) {
-        NSString *convMode = [self _modeFromConversation:conv];
-        if ([convMode.lowercaseString isEqualToString:targetMode.lowercaseString]) {
-            count++;
-        }
-    }
-    
-    return count;
-}
-
-- (void)clearTasksForMode:(DKTaskMode)mode
-               completion:(void (^)(BOOL success, NSInteger deletedCount, NSString *errorMessage))completion {
-    
-    void (^completeOnMain)(BOOL, NSInteger, NSString *) = ^(BOOL success, NSInteger count, NSString *error) {
-        if (completion) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                completion(success, count, error);
-            });
-        }
-    };
-    
-    if (![self _ensureRepository]) {
-        completeOnMain(NO, 0, @"任务管理模块未找到");
-        return;
-    }
-    
-    // 后台执行删除
+- (void)clearTasksWithMode:(DKTaskClearMode)mode
+                completion:(void (^)(BOOL, NSInteger))completion {
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        @try {
-            NSArray *conversations = [self _fetchAllConversations];
-            if (!conversations || conversations.count == 0) {
-                completeOnMain(YES, 0, nil);
-                return;
-            }
-            
-            NSString *targetMode = nil;
-            if (mode == DKTaskModeWork) {
-                targetMode = @"work";
-            } else if (mode == DKTaskModeCode) {
-                targetMode = @"code";
-            }
-            
-            NSMutableArray *toDelete = [NSMutableArray array];
-            for (id conv in conversations) {
-                if (mode == DKTaskModeAll) {
-                    [toDelete addObject:conv];
-                } else {
-                    NSString *convMode = [self _modeFromConversation:conv];
-                    if ([convMode.lowercaseString isEqualToString:targetMode.lowercaseString]) {
-                        [toDelete addObject:conv];
-                    }
-                }
-            }
-            
-            DKTaskLog(@"Found %lu conversations to delete (mode: %ld)",
-                      (unsigned long)toDelete.count, (long)mode);
-            
-            NSInteger deletedCount = 0;
-            for (id conv in toDelete) {
-                NSString *convId = [self _conversationId:conv];
-                if (convId.length > 0) {
-                    if ([self _deleteConversationWithId:convId]) {
-                        deletedCount++;
-                    }
-                }
-            }
-            
-            // 刷新 UI
-            [self _postUpdateNotification];
-            
-            DKTaskLog(@"Successfully deleted %lu tasks", (long)deletedCount);
-            completeOnMain(YES, deletedCount, nil);
-            
-        } @catch (NSException *exception) {
-            DKTaskLog(@"Exception while clearing tasks: %@", exception);
-            completeOnMain(NO, 0, exception.description);
+        if (!self->_isSupported) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (completion) completion(NO, 0);
+            });
+            return;
         }
+        
+        NSArray *conversations = [self _fetchConversationsForMode:mode];
+        NSInteger totalCount = conversations.count;
+        NSInteger deletedCount = 0;
+        
+        DKTaskLog(@"开始清理任务，模式=%ld，总数=%ld", (long)mode, (long)totalCount);
+        
+        for (id conv in conversations) {
+            @try {
+                NSString *convId = nil;
+                if (self.conversationIdKeyPath) {
+                    convId = [conv valueForKeyPath:self.conversationIdKeyPath];
+                }
+                if (!convId) {
+                    // 尝试常见属性名
+                    convId = [conv valueForKey:@"identifier"];
+                }
+                if (!convId) {
+                    convId = [conv valueForKey:@"conversationId"];
+                }
+                if (!convId) {
+                    convId = [conv valueForKey:@"ID"];
+                }
+                
+                if (convId) {
+                    [self _deleteConversationWithId:convId];
+                    deletedCount++;
+                }
+            } @catch (NSException *e) {
+                DKTaskLog(@"删除会话失败: %@", e);
+            }
+        }
+        
+        DKTaskLog(@"清理完成，成功删除 %ld / %ld 个任务", (long)deletedCount, (long)totalCount);
+        
+        // 发送刷新通知
+        [self _postUpdateNotification];
+        
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (completion) completion(deletedCount > 0, deletedCount);
+        });
     });
 }
 
-#pragma mark - 内部辅助方法
+- (void)dumpRuntimeInfo {
+    if (!_hasDetected) {
+        [self _detect];
+    }
+}
 
-- (NSArray *)_fetchAllConversations {
-    if (!_repoInstance) return nil;
+#pragma mark - Private Detection
+
+- (void)_detect {
+    if (_hasDetected) return;
+    _hasDetected = YES;
     
-    @try {
-        // 尝试调用 getAllConversations 方法
-        // Swift 方法签名可能是: getAllConversations(orderByUpdatedAt:limit:offset:)
-        // 我们先尝试几种可能的 selector
+    DKTaskLog(@"开始探测会话存储类...");
+    
+    // 候选类名（按优先级排列）
+    NSArray *candidateNames = @[
+        // 从崩溃日志中发现的类
+        @"AFConversationStore",
+        // SLIM 相关
+        @"SLIMConversationRepository",
+        @"_TtC7SLIMKit26SLIMConversationRepository",
+        @"$s7SLIMKit26SLIMConversationRepositoryC",
+        @"SLIMKit.SLIMConversationRepository",
+        @"SLConversationRepository",
+        @"SLTaskSessionManager",
+        @"_TtC7SLIMKit20SLTaskSessionManager",
+        // 其他可能
+        @"ConversationStore",
+        @"ConversationManager",
+        @"TaskStore",
+        @"TaskManager",
+    ];
+    
+    Class foundClass = nil;
+    id foundInstance = nil;
+    
+    for (NSString *name in candidateNames) {
+        Class cls = NSClassFromString(name);
+        if (!cls) continue;
         
-        NSArray *selectorsToTry = @[
-            // 完整方法名
-            @"getAllConversationsWithOrderByUpdatedAt:limit:offset:",
-            @"getAllConversationsOrderByUpdatedAt:limit:offset:",
-            @"allConversationsWithOrderBy:limit:offset:",
-            // 简化版
-            @"getAllConversations",
-            @"allConversations",
-            @"fetchAllConversations",
-            @"conversationList",
-            // 带 namespace 参数的版本
-            @"getAllConversationsWithNamespace:orderByUpdatedAt:limit:offset:",
-        ];
+        DKTaskLog(@"  找到候选类: %@", name);
         
-        for (NSString *selName in selectorsToTry) {
-            SEL selector = NSSelectorFromString(selName);
-            if ([_repoInstance respondsToSelector:selector]) {
-                DKTaskLog(@"Trying selector: %@", selName);
-                
-                // 对于无参数方法，直接调用
-                NSMethodSignature *sig = [_repoInstance methodSignatureForSelector:selector];
-                if (!sig) continue;
-                
-                NSInvocation *invocation = [NSInvocation invocationWithMethodSignature:sig];
-                invocation.target = _repoInstance;
-                invocation.selector = selector;
-                
-                // 设置默认参数
-                NSInteger numberOfArgs = sig.numberOfArguments - 2; // 减去 self 和 _cmd
-                if (numberOfArgs >= 1) {
-                    BOOL orderBy = YES;
-                    [invocation setArgument:&orderBy atIndex:2];
-                }
-                if (numberOfArgs >= 2) {
-                    int limit = 1000; // 获取足够多的任务
-                    [invocation setArgument:&limit atIndex:3];
-                }
-                if (numberOfArgs >= 3) {
-                    int offset = 0;
-                    [invocation setArgument:&offset atIndex:4];
-                }
-                
-                [invocation invoke];
-                
-                __unsafe_unretained id result = nil;
-                if (sig.methodReturnLength > 0) {
-                    [invocation getReturnValue:&result];
-                }
-                
-                if (result && [result isKindOfClass:[NSArray class]]) {
-                    DKTaskLog(@"Got %lu conversations via selector: %@",
-                              (unsigned long)[(NSArray *)result count], selName);
+        // 检查是否有会话相关方法
+        if (![self _classHasConversationMethods:cls]) {
+            DKTaskLog(@"    跳过：没有会话相关方法");
+            continue;
+        }
+        
+        // 尝试获取单例
+        id instance = [self _getSingletonOfClass:cls];
+        if (instance) {
+            foundClass = cls;
+            foundInstance = instance;
+            DKTaskLog(@"    成功获取实例");
+            break;
+        }
+    }
+    
+    // 如果预设候选都没找到，枚举所有类
+    if (!foundClass) {
+        DKTaskLog(@"  预设候选未找到，开始全类枚举搜索...");
+        foundClass = [self _enumerateClassesForConversationStore:&foundInstance];
+    }
+    
+    if (foundClass && foundInstance) {
+        _storeClass = foundClass;
+        _storeInstance = foundInstance;
+        
+        // 探测方法名
+        [self _detectMethods];
+        
+        _isSupported = (_getAllConversationsSelectorName != nil);
+        
+        DKTaskLog(@"探测完成: 类=%@, 支持=%d", NSStringFromClass(foundClass), _isSupported);
+    } else {
+        DKTaskLog(@"探测失败: 未找到合适的会话存储类");
+        _isSupported = NO;
+    }
+}
+
+- (BOOL)_classHasConversationMethods:(Class)cls {
+    unsigned int methodCount = 0;
+    Method *methods = class_copyMethodList(cls, &methodCount);
+    BOOL hasConversation = NO;
+    
+    for (unsigned int i = 0; i < methodCount; i++) {
+        SEL sel = method_getName(methods[i]);
+        NSString *name = NSStringFromSelector(sel);
+        NSString *lower = name.lowercaseString;
+        
+        if ([lower containsString:@"conversation"]) {
+            hasConversation = YES;
+            break;
+        }
+    }
+    
+    free(methods);
+    return hasConversation;
+}
+
+- (id)_getSingletonOfClass:(Class)cls {
+    SEL selectors[] = {
+        @selector(sharedStore),
+        @selector(sharedManager),
+        @selector(sharedInstance),
+        @selector(shared),
+        @selector(defaultStore),
+        @selector(defaultManager),
+        @selector(defaultRepository),
+    };
+    
+    for (int i = 0; i < sizeof(selectors)/sizeof(SEL); i++) {
+        SEL sel = selectors[i];
+        if ([cls respondsToSelector:sel]) {
+            @try {
+                IMP imp = [cls methodForSelector:sel];
+                id (*func)(id, SEL) = (void *)imp;
+                id result = func(cls, sel);
+                if (result) {
+                    DKTaskLog(@"    通过 %@ 获取到实例", NSStringFromSelector(sel));
                     return result;
                 }
+            } @catch (NSException *e) {
+                DKTaskLog(@"    调用 %@ 异常: %@", NSStringFromSelector(sel), e);
             }
         }
+    }
+    
+    return nil;
+}
+
+- (Class)_enumerateClassesForConversationStore:(id **)outInstance {
+    int numClasses = objc_getClassList(NULL, 0);
+    if (numClasses <= 0) return nil;
+    
+    Class *classes = (Class *)malloc(sizeof(Class) * numClasses);
+    numClasses = objc_getClassList(classes, numClasses);
+    
+    Class bestClass = nil;
+    id bestInstance = nil;
+    NSInteger bestScore = -1;
+    
+    for (int i = 0; i < numClasses; i++) {
+        Class cls = classes[i];
+        NSString *name = NSStringFromClass(cls);
+        NSString *lower = name.lowercaseString;
         
-        // 如果上面的方法都不行，枚举所有方法找包含 "Conversation" 的
-        DKTaskLog(@"Trying to find conversation method by enumeration...");
-        NSArray *methods = [self _methodListForClass:_repoClass];
-        for (NSString *methodName in methods) {
-            if ([methodName.lowercaseString containsString:@"conversation"] &&
-                ([methodName.lowercaseString containsString:@"get"] ||
-                 [methodName.lowercaseString containsString:@"all"] ||
-                 [methodName.lowercaseString containsString:@"list"] ||
-                 [methodName.lowercaseString containsString:@"fetch"])) {
-                
-                SEL selector = NSSelectorFromString(methodName);
-                if ([_repoInstance respondsToSelector:selector]) {
-                    @try {
-                        IMP imp = [_repoInstance methodForSelector:selector];
-                        id (*func)(id, SEL) = (void *)imp;
-                        id result = func(_repoInstance, selector);
-                        if (result && [result isKindOfClass:[NSArray class]]) {
-                            DKTaskLog(@"Found working selector: %@, count=%lu",
-                                      methodName, (unsigned long)[(NSArray *)result count]);
-                            return result;
-                        }
-                    } @catch (NSException *e) {
-                        // 忽略，继续试下一个
-                    }
+        // 跳过系统类和非存储/管理类
+        if (!([lower containsString:@"conversation"] ||
+              [lower containsString:@"chat"] ||
+              [lower containsString:@"message"])) {
+            continue;
+        }
+        if (!([lower containsString:@"store"] ||
+              [lower containsString:@"manager"] ||
+              [lower containsString:@"repository"] ||
+              [lower containsString:@"helper"] ||
+              [lower containsString:@"service"])) {
+            continue;
+        }
+        
+        // 计算分数
+        NSInteger score = 0;
+        if ([lower containsString:@"conversation"]) score += 10;
+        if ([lower containsString:@"store"]) score += 5;
+        if ([lower containsString:@"manager"]) score += 3;
+        if ([lower containsString:@"af"]) score += 3;  // AF前缀
+        if ([lower containsString:@"slim"]) score += 2;
+        
+        // 检查是否有会话相关方法
+        unsigned int methodCount = 0;
+        Method *methods = class_copyMethodList(cls, &methodCount);
+        NSInteger methodScore = 0;
+        for (unsigned int j = 0; j < methodCount; j++) {
+            SEL sel = method_getName(methods[j]);
+            NSString *mName = NSStringFromSelector(sel).lowercaseString;
+            if ([mName containsString:@"conversation"]) methodScore++;
+            if ([mName containsString:@"fetch"] || [mName containsString:@"get"]) methodScore++;
+            if ([mName containsString:@"delete"] || [mName containsString:@"remove"]) methodScore++;
+            if ([mName containsString:@"all"]) methodScore++;
+        }
+        free(methods);
+        
+        score += methodScore;
+        
+        if (score > bestScore) {
+            // 尝试获取单例
+            id instance = [self _getSingletonOfClass:cls];
+            if (instance) {
+                bestScore = score;
+                bestClass = cls;
+                bestInstance = instance;
+                DKTaskLog(@"    找到更好的候选: %@ (分数=%ld)", name, (long)score);
+            }
+        }
+    }
+    
+    free(classes);
+    
+    if (bestClass && bestInstance) {
+        *outInstance = bestInstance;
+        return bestClass;
+    }
+    return nil;
+}
+
+- (void)_detectMethods {
+    if (!_storeClass) return;
+    
+    DKTaskLog(@"  探测方法名...");
+    
+    unsigned int methodCount = 0;
+    Method *methods = class_copyMethodList(_storeClass, &methodCount);
+    
+    NSMutableArray *getterCandidates = [NSMutableArray array];
+    NSMutableArray *deleterCandidates = [NSMutableArray array];
+    
+    for (unsigned int i = 0; i < methodCount; i++) {
+        SEL sel = method_getName(methods[i]);
+        NSString *name = NSStringFromSelector(sel);
+        NSString *lower = name.lowercaseString;
+        
+        // 获取所有会话的方法
+        if (([lower containsString:@"allconversation"] ||
+             [lower containsString:@"conversationlist"] ||
+             [lower containsString:@"fetchconversation"] ||
+             [lower containsString:@"getconversation"]) &&
+            ([lower containsString:@"all"] ||
+             [lower containsString:@"list"])) {
+            [getterCandidates addObject:name];
+        }
+        
+        // 删除会话的方法
+        if (([lower containsString:@"deleteconversation"] ||
+             [lower containsString:@"removeconversation"]) &&
+            ![lower containsString:@"all"]) {
+            [deleterCandidates addObject:name];
+        }
+    }
+    
+    free(methods);
+    
+    DKTaskLog(@"    获取方法候选: %@", getterCandidates);
+    DKTaskLog(@"    删除方法候选: %@", deleterCandidates);
+    
+    // 选择最合适的获取方法
+    if (getterCandidates.count > 0) {
+        _getAllConversationsSelectorName = getterCandidates.firstObject;
+        DKTaskLog(@"    选中获取方法: %@", _getAllConversationsSelectorName);
+    }
+    
+    // 选择最合适的删除方法
+    if (deleterCandidates.count > 0) {
+        _deleteConversationSelectorName = deleterCandidates.firstObject;
+        DKTaskLog(@"    选中删除方法: %@", _deleteConversationSelectorName);
+    }
+    
+    // 探测会话模型属性
+    [self _detectConversationModelProperties];
+}
+
+- (void)_detectConversationModelProperties {
+    NSArray *convs = [self _fetchAllConversations];
+    if (convs.count == 0) {
+        DKTaskLog(@"    没有会话数据，无法探测模型属性");
+        return;
+    }
+    
+    id firstConv = convs.firstObject;
+    Class convClass = [firstConv class];
+    DKTaskLog(@"    会话模型类: %@", NSStringFromClass(convClass));
+    
+    unsigned int propCount = 0;
+    objc_property_t *props = class_copyPropertyList(convClass, &propCount);
+    
+    NSMutableArray *propNames = [NSMutableArray array];
+    for (unsigned int i = 0; i < propCount; i++) {
+        const char *name = property_getName(props[i]);
+        NSString *propName = [NSString stringWithUTF8String:name];
+        [propNames addObject:propName];
+        
+        NSString *lower = propName.lowercaseString;
+        // 找 ID 属性
+        if ([lower isEqualToString:@"identifier"] ||
+            [lower isEqualToString:@"conversationid"] ||
+            [lower isEqualToString:@"id"] ||
+            [lower isEqualToString:@"uid"]) {
+            _conversationIdKeyPath = propName;
+        }
+        // 找 mode 属性
+        if ([lower isEqualToString:@"mode"] ||
+            [lower isEqualToString:@"type"] ||
+            [lower containsString:@"mode"] ||
+            [lower containsString:@"type"]) {
+            _conversationModeKeyPath = propName;
+        }
+    }
+    
+    free(props);
+    
+    DKTaskLog(@"    会话属性: %@", propNames);
+    DKTaskLog(@"    ID属性: %@", _conversationIdKeyPath);
+    DKTaskLog(@"    Mode属性: %@", _conversationModeKeyPath);
+}
+
+#pragma mark - Private Data Operations
+
+- (NSArray *)_fetchAllConversations {
+    if (!_storeInstance || !_getAllConversationsSelectorName) {
+        return @[];
+    }
+    
+    SEL selector = NSSelectorFromString(_getAllConversationsSelectorName);
+    if (![_storeInstance respondsToSelector:selector]) {
+        return @[];
+    }
+    
+    @try {
+        IMP imp = [_storeInstance methodForSelector:selector];
+        NSArray* (*func)(id, SEL) = (void *)imp;
+        NSArray *result = func(_storeInstance, selector);
+        return result ?: @[];
+    } @catch (NSException *e) {
+        DKTaskLog(@"获取会话列表异常: %@", e);
+        return @[];
+    }
+}
+
+- (NSArray *)_fetchConversationsForMode:(DKTaskClearMode)mode {
+    NSArray *allConvs = [self _fetchAllConversations];
+    if (mode == DKTaskClearModeAll) {
+        return allConvs;
+    }
+    
+    NSMutableArray *filtered = [NSMutableArray array];
+    NSString *targetMode = (mode == DKTaskClearModeWork) ? @"work" : @"code";
+    
+    for (id conv in allConvs) {
+        @try {
+            NSString *modeValue = nil;
+            if (_conversationModeKeyPath) {
+                id val = [conv valueForKeyPath:_conversationModeKeyPath];
+                if ([val isKindOfClass:[NSString class]]) {
+                    modeValue = (NSString *)val;
+                } else if ([val isKindOfClass:[NSNumber class]]) {
+                    modeValue = [(NSNumber *)val stringValue];
                 }
             }
-        }
-        
-        DKTaskLog(@"ERROR: Could not find a way to fetch conversations");
-        return nil;
-        
-    } @catch (NSException *exception) {
-        DKTaskLog(@"Exception fetching conversations: %@", exception);
-        return nil;
-    }
-}
-
-- (NSString *)_modeFromConversation:(id)conversation {
-    if (!conversation) return nil;
-    
-    @try {
-        // 尝试访问 mode 属性
-        if ([conversation respondsToSelector:@selector(mode)]) {
-            id mode = [conversation valueForKey:@"mode"];
-            if ([mode isKindOfClass:[NSString class]]) {
-                return mode;
-            }
-            if ([mode isKindOfClass:[NSNumber class]]) {
-                return [mode stringValue];
-            }
-        }
-        
-        // 尝试直接 KVC
-        id modeValue = [conversation valueForKey:@"mode"];
-        if ([modeValue isKindOfClass:[NSString class]]) {
-            return modeValue;
-        }
-        
-        // 尝试 cliType
-        id cliType = [conversation valueForKey:@"cliType"];
-        if ([cliType isKindOfClass:[NSString class]]) {
-            return cliType;
-        }
-        
-        // 尝试 type
-        id typeValue = [conversation valueForKey:@"type"];
-        if ([typeValue isKindOfClass:[NSString class]]) {
-            return typeValue;
-        }
-        
-        DKTaskLog(@"WARN: Could not get mode from conversation: %@", conversation);
-        return nil;
-        
-    } @catch (NSException *exception) {
-        DKTaskLog(@"Exception getting mode: %@", exception);
-        return nil;
-    }
-}
-
-- (NSString *)_conversationId:(id)conversation {
-    if (!conversation) return nil;
-    
-    @try {
-        // 尝试 id 属性
-        if ([conversation respondsToSelector:@selector(id)]) {
-            id convId = [conversation valueForKey:@"id"];
-            if ([convId isKindOfClass:[NSString class]]) {
-                return convId;
-            }
-        }
-        
-        // KVC
-        id convId = [conversation valueForKey:@"id"];
-        if ([convId isKindOfClass:[NSString class]]) {
-            return convId;
-        }
-        
-        // conversationId
-        id conversationId = [conversation valueForKey:@"conversationId"];
-        if ([conversationId isKindOfClass:[NSString class]]) {
-            return conversationId;
-        }
-        
-        DKTaskLog(@"WARN: Could not get ID from conversation");
-        return nil;
-        
-    } @catch (NSException *exception) {
-        DKTaskLog(@"Exception getting conversation ID: %@", exception);
-        return nil;
-    }
-}
-
-- (BOOL)_deleteConversationWithId:(NSString *)conversationId {
-    if (!conversationId || conversationId.length == 0) return NO;
-    if (!_repoInstance) return NO;
-    
-    @try {
-        // 尝试多种删除方法
-        NSArray *deleteSelectors = @[
-            @"deleteConversationWithId:completion:",
-            @"deleteConversationById:completion:",
-            @"deleteConversation:completion:",
-            @"removeConversationWithId:completion:",
-            @"removeConversationById:completion:",
-            @"deleteConversationWithId:",
-            @"deleteConversationById:",
-            @"deleteConversation:",
-        ];
-        
-        for (NSString *selName in deleteSelectors) {
-            SEL selector = NSSelectorFromString(selName);
-            if ([_repoInstance respondsToSelector:selector]) {
-                DKTaskLog(@"Trying delete selector: %@", selName);
-                
-                NSMethodSignature *sig = [_repoInstance methodSignatureForSelector:selector];
-                if (!sig) continue;
-                
-                NSInteger argCount = sig.numberOfArguments - 2;
-                
-                if (argCount == 1) {
-                    // 只有一个参数（id），无 completion
-                    IMP imp = [_repoInstance methodForSelector:selector];
-                    void (*func)(id, SEL, NSString *) = (void *)imp;
-                    func(_repoInstance, selector, conversationId);
-                    return YES;
-                    
-                } else if (argCount >= 2) {
-                    // 有 completion block
-                    IMP imp = [_repoInstance methodForSelector:selector];
-                    void (*func)(id, SEL, NSString *, void (^)(id)) = (void *)imp;
-                    
-                    __block BOOL done = NO;
-                    __block BOOL success = NO;
-                    
-                    void (^completionBlock)(id) = ^(id result) {
-                        done = YES;
-                        success = YES;
-                        DKTaskLog(@"Delete completed for %@", conversationId);
-                    };
-                    
-                    func(_repoInstance, selector, conversationId, completionBlock);
-                    
-                    // 等一小段时间让异步操作开始
-                    // 注意：删除可能是异步的，这里我们假设只要方法调用成功即可
-                    return YES;
-                }
-            }
-        }
-        
-        // 如果 repo 上找不到，试试 SLTaskSessionManager
-        Class sessionManagerClass = NSClassFromString(@"_TtC7SLIMKit20SLTaskSessionManager");
-        if (sessionManagerClass) {
-            id sessionManager = nil;
             
-            // 获取单例
-            SEL sharedSel = NSSelectorFromString(@"shared");
-            SEL sharedManagerSel = NSSelectorFromString(@"sharedManager");
-            if ([sessionManagerClass respondsToSelector:sharedSel]) {
-                IMP imp = [sessionManagerClass methodForSelector:sharedSel];
-                id (*func)(id, SEL) = (void *)imp;
-                sessionManager = func(sessionManagerClass, sharedSel);
-            } else if ([sessionManagerClass respondsToSelector:sharedManagerSel]) {
-                IMP imp = [sessionManagerClass methodForSelector:sharedManagerSel];
-                id (*func)(id, SEL) = (void *)imp;
-                sessionManager = func(sessionManagerClass, sharedManagerSel);
+            // 如果没找到mode属性，假设所有会话都是work模式（保守处理）
+            if (!_conversationModeKeyPath) {
+                if (mode == DKTaskClearModeWork) {
+                    [filtered addObject:conv];
+                }
+                continue;
             }
             
-            if (sessionManager) {
-                for (NSString *selName in deleteSelectors) {
-                    SEL selector = NSSelectorFromString(selName);
-                    if ([sessionManager respondsToSelector:selector]) {
-                        DKTaskLog(@"Found delete on SLTaskSessionManager: %@", selName);
-                        NSMethodSignature *sig = [sessionManager methodSignatureForSelector:selector];
-                        if (sig && sig.numberOfArguments - 2 >= 1) {
-                            IMP imp = [sessionManager methodForSelector:selector];
-                            void (*func)(id, SEL, NSString *) = (void *)imp;
-                            func(sessionManager, selector, conversationId);
-                            return YES;
-                        }
-                    }
-                }
+            if (modeValue && [modeValue.lowercaseString containsString:targetMode]) {
+                [filtered addObject:conv];
             }
+        } @catch (NSException *e) {
+            // 忽略单个会话的错误
+        }
+    }
+    
+    return filtered;
+}
+
+- (NSInteger)_taskCountForMode:(NSString *)modeName {
+    if (!_hasDetected) {
+        [self _detect];
+    }
+    if (!_isSupported) return 0;
+    
+    DKTaskClearMode mode = DKTaskClearModeAll;
+    if ([modeName.lowercaseString isEqualToString:@"work"]) {
+        mode = DKTaskClearModeWork;
+    } else if ([modeName.lowercaseString isEqualToString:@"code"]) {
+        mode = DKTaskClearModeCode;
+    }
+    
+    return [self _fetchConversationsForMode:mode].count;
+}
+
+- (void)_deleteConversationWithId:(NSString *)convId {
+    if (!_storeInstance || !_deleteConversationSelectorName || !convId) {
+        return;
+    }
+    
+    SEL selector = NSSelectorFromString(_deleteConversationSelectorName);
+    if (![_storeInstance respondsToSelector:selector]) {
+        return;
+    }
+    
+    @try {
+        // 尝试不同的方法签名
+        // 1. deleteConversationWithId:
+        // 2. deleteConversation:
+        // 3. removeConversation:
+        // 4. 删除方法带 completion block
+        
+        NSMethodSignature *sig = [_storeInstance methodSignatureForSelector:selector];
+        NSInvocation *invocation = [NSInvocation invocationWithMethodSignature:sig];
+        invocation.target = _storeInstance;
+        invocation.selector = selector;
+        
+        // 根据方法名猜测参数
+        NSString *lower = _deleteConversationSelectorName.lowercaseString;
+        if ([lower containsString:@"withid"] ||
+            [lower containsString:@"identifier"] ||
+            [lower containsString:@"id:"]) {
+            // 第一个参数是 ID
+            [invocation setArgument:&convId atIndex:2];
+        } else {
+            // 第一个参数可能是会话对象，尝试传 ID 也试试
+            [invocation setArgument:&convId atIndex:2];
         }
         
-        DKTaskLog(@"ERROR: Could not find delete method for conversation: %@", conversationId);
-        return NO;
-        
-    } @catch (NSException *exception) {
-        DKTaskLog(@"Exception deleting conversation: %@", exception);
-        return NO;
+        [invocation invoke];
+    } @catch (NSException *e) {
+        DKTaskLog(@"调用删除方法异常: %@", e);
     }
 }
 
 - (void)_postUpdateNotification {
-    @try {
-        // 发送列表更新通知
-        NSNotificationCenter *nc = [NSNotificationCenter defaultCenter];
-        
-        // 尝试已知的通知名
-        NSArray *notifNames = @[
-            @"kUpdateConversationListNotification",
-            @"SLConversationListDidUpdateNotification",
-            @"SLTaskListDidUpdateNotification",
-            @"ConversationListDidChangeNotification",
-            @"TaskListDidChangeNotification",
-        ];
-        
-        for (NSString *name in notifNames) {
-            [nc postNotificationName:name object:nil];
-        }
-        
-        DKTaskLog(@"Posted update notifications");
-        
-    } @catch (NSException *exception) {
-        DKTaskLog(@"Exception posting notification: %@", exception);
-    }
-}
-
-#pragma mark - 调试方法
-
-- (void)dumpRuntimeInfo {
-    DKTaskLog(@"========== DKTaskCleaner Runtime Info ==========");
+    // 尝试已知的通知名
+    NSArray *notifNames = @[
+        @"kUpdateConversationListNotification",
+        @"SLConversationListDidUpdateNotification",
+        @"AFConversationListDidChangeNotification",
+        @"ConversationListDidUpdateNotification",
+        @"NSCurrentLocaleDidChangeNotification",  // fallback 不相关，仅占位
+    ];
     
-    // 枚举所有类，找出和 conversation/task 相关的
-    int numClasses = objc_getClassList(NULL, 0);
-    if (numClasses > 0) {
-        Class *classes = (Class *)malloc(sizeof(Class) * numClasses);
-        numClasses = objc_getClassList(classes, numClasses);
-        
-        NSMutableArray *conversationClasses = [NSMutableArray array];
-        NSMutableArray *taskClasses = [NSMutableArray array];
-        NSMutableArray *slimClasses = [NSMutableArray array];
-        
-        for (int i = 0; i < numClasses; i++) {
-            Class cls = classes[i];
-            NSString *className = NSStringFromClass(cls);
-            NSString *lower = className.lowercaseString;
-            
-            if ([lower containsString:@"conversation"]) {
-                [conversationClasses addObject:className];
-            }
-            if ([lower containsString:@"task"] &&
-                ([lower containsString:@"manager"] ||
-                 [lower containsString:@"session"] ||
-                 [lower containsString:@"store"] ||
-                 [lower containsString:@"repository"] ||
-                 [lower containsString:@"viewmodel"])) {
-                [taskClasses addObject:className];
-            }
-            if ([lower containsString:@"slim"] &&
-                ([lower containsString:@"db"] ||
-                 [lower containsString:@"database"] ||
-                 [lower containsString:@"store"] ||
-                 [lower containsString:@"repo"])) {
-                [slimClasses addObject:className];
-            }
-        }
-        
-        free(classes);
-        
-        DKTaskLog(@"--- Conversation-related classes (%lu) ---", (unsigned long)conversationClasses.count);
-        for (NSString *name in conversationClasses) {
-            DKTaskLog(@"  %@", name);
-        }
-        
-        DKTaskLog(@"--- Task manager/repo classes (%lu) ---", (unsigned long)taskClasses.count);
-        for (NSString *name in taskClasses) {
-            DKTaskLog(@"  %@", name);
-        }
-        
-        DKTaskLog(@"--- SLIM DB/Store classes (%lu) ---", (unsigned long)slimClasses.count);
-        for (NSString *name in slimClasses) {
-            DKTaskLog(@"  %@", name);
+    for (NSString *name in notifNames) {
+        @try {
+            [[NSNotificationCenter defaultCenter] postNotificationName:name object:nil];
+        } @catch (NSException *e) {
+            // 忽略
         }
     }
-    
-    // 尝试获取仓库实例并获取会话
-    if ([self _ensureRepository]) {
-        DKTaskLog(@"--- Repository found: %@ ---", NSStringFromClass(_repoClass));
-        DKTaskLog(@"Instance: %@", _repoInstance);
-        DKTaskLog(@"Methods: %@", [self _methodListForClass:_repoClass]);
-        
-        NSArray *convs = [self _fetchAllConversations];
-        DKTaskLog(@"Conversations count: %lu", (unsigned long)convs.count);
-        
-        if (convs.count > 0) {
-            id firstConv = convs.firstObject;
-            DKTaskLog(@"First conversation class: %@", NSStringFromClass([firstConv class]));
-            DKTaskLog(@"First conversation description: %@", firstConv);
-            
-            // 尝试获取所有属性
-            unsigned int count;
-            objc_property_t *props = class_copyPropertyList([firstConv class], &count);
-            NSMutableArray *propNames = [NSMutableArray array];
-            for (unsigned int i = 0; i < count; i++) {
-                const char *name = property_getName(props[i]);
-                [propNames addObject:[NSString stringWithUTF8String:name]];
-            }
-            free(props);
-            DKTaskLog(@"First conversation properties: %@", propNames);
-        }
-    } else {
-        DKTaskLog(@"--- Repository NOT found ---");
-    }
-    
-    DKTaskLog(@"=================================================");
-}
-
-- (NSArray<NSString *> *)_methodListForClass:(Class)cls {
-    if (!cls) return @[];
-    
-    NSMutableArray<NSString *> *methods = [NSMutableArray array];
-    unsigned int count;
-    Method *methodList = class_copyMethodList(cls, &count);
-    
-    for (unsigned int i = 0; i < count; i++) {
-        SEL sel = method_getName(methodList[i]);
-        NSString *name = NSStringFromSelector(sel);
-        [methods addObject:name];
-    }
-    
-    free(methodList);
-    
-    // 也加类方法
-    Method *classMethodList = class_copyMethodList(object_getClass(cls), &count);
-    for (unsigned int i = 0; i < count; i++) {
-        SEL sel = method_getName(classMethodList[i]);
-        NSString *name = [@"+" stringByAppendingString:NSStringFromSelector(sel)];
-        [methods addObject:name];
-    }
-    free(classMethodList);
-    
-    [methods sortUsingSelector:@selector(compare:)];
-    return methods;
 }
 
 @end
