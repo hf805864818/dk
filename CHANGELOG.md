@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.0.114] - 2026-08-14
+
+- 61b845a feat: 添加清空Work/Code任务功能
+
+
 ## [1.0.113] - 2026-08-10
 
 - 7907883 fix: 修复 MonkeyCode OAuth 登录后 cookie 被延迟清理覆盖
